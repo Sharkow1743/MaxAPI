@@ -270,3 +270,25 @@ class MaxAPI:
         """
         payload = {"contactIds": contact_ids}
         return self._send_command(32, payload)
+    
+    def send_generic_command(self, command_name: str, payload: dict, wait_for_response: bool = True, timeout: int = 10):
+            """
+            Sends a command to the server using its human-readable name.
+
+            Args:
+                command_name (str): The name of the command. Must be a key in MaxAPI.OPCODE_MAP.
+                payload (dict): The data payload for the command.
+                wait_for_response (bool, optional): Whether to wait for a server response. Defaults to True.
+                timeout (int, optional): How long to wait for a response in seconds. Defaults to 10.
+
+            Returns:
+                dict or None: The response payload from the server, or None if wait_for_response is False.
+            
+            Raises:
+                ValueError: If the command_name is not found in the OPCODE_MAP.
+            """
+            if command_name not in self.OPCODE_MAP:
+                raise ValueError(f"Unknown command name '{command_name}'. Valid names are: {list(self.OPCODE_MAP.keys())}")
+            
+            opcode = self.OPCODE_MAP[command_name]
+            return self._send_command(opcode, payload, wait_for_response, timeout)
