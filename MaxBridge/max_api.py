@@ -257,3 +257,16 @@ class MaxAPI:
             "mark": int(time.time() * 1000)
         }
         return self._send_command(50, payload)
+    
+    def get_contact_details(self, contact_ids: list):
+        """
+        Retrieves profile information for a list of contact IDs.
+
+        Args:
+            contact_ids (list): A list of integer user IDs.
+
+        Returns:
+            dict: The response payload containing a list of contact profile objects.
+        """
+        payload = {"contactIds": contact_ids}
+        return self._send_command(32, payload)
