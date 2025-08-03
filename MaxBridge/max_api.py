@@ -1,28 +1,39 @@
-import websocket
+import tornado.ioloop
+import tornado.websocket
+import tornado.gen
 import json
 import time
 import threading
 import itertools
 import signal
+from concurrent.futures import Future as ConcurrentFuture # Renamed to avoid conflict
 
 class MaxAPI:
     """
-    A Python wrapper for the Max Messenger WebSocket API.
-    
-    This class handles the connection, authentication, and communication
-    protocol for interacting with Max Messenger.
+    A Python wrapper for the Max Messenger WebSocket API, powered by Tornado.
+    The public interface remains synchronous and blocking for user convenience.
     """
+
+    OPCODE_MAP = {
+        'HEARTBEAT': 1,
+        'HANDSHAKE': 6,
+        'AUTHENTICATE': 19,
+        'GET_CONTACT_DETAILS': 32,
+        'GET_HISTORY': 49,
+        'MARK_AS_READ': 50,
+        'SEND_MESSAGE': 64,
+        'SUBSCRIBE_TO_CHAT': 75,
+    }
 
     def __init__(self, auth_token: str, on_event=None):
         """
         Initializes the MaxAPI instance.
-
+        This constructor will block until the connection is established and authenticated.
+        
         Args:
-            auth_token (str): The long-lived authentication token obtained from a
-                              legitimate web session. This is the most critical credential.
-            on_event (callable, optional): A callback function that will be executed
-                                           for any server-pushed events (like new messages).
-                                           It receives the full event data dictionary.
+            auth_token (str): The authentication token for the session.
+            on_event (callable, optional): A callback function to handle server-push events.
+                                           It receives one argument: the event data dictionary.
         """
         self.auth_token = auth_token
         self.ws_url = "wss://ws-api.oneme.ru/websocket"
@@ -32,263 +43,292 @@ class MaxAPI:
             "headerUserAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:141.0) Gecko/20100101 Firefox/141.0",
             "appVersion": "25.7.13", "screen": "1080x1920 1.0x", "timezone": "Asia/Novosibirsk"
         }
+        self.user = None
 
         self.ws = None
-        self.listener_thread = None
-        self.heartbeat_thread = None
+        self.ioloop = None
+        self.ioloop_thread = None
+        self.heartbeat_callback = None
+        
         self.is_running = False
         self.seq_counter = itertools.count()
-        
-        # For matching requests with responses
-        self.pending_responses = {}
+
         self.response_lock = threading.Lock()
-        
-        # Callback for server-pushed events
+        self.pending_responses = {}
+        self.ready_event = threading.Event()
+
         self.on_event = on_event if callable(on_event) else self._default_on_event
 
-        signal.signal(signal.SIGINT, self._close)
-        signal.signal(signal.SIGTERM, self._close)
+        signal.signal(signal.SIGINT, self._signal_handler)
+        signal.signal(signal.SIGTERM, self._signal_handler)
 
-        self._connect()
+        self._start_ioloop()
+        
+        is_ready = self.ready_event.wait(timeout=20)
+        if not is_ready or not self.is_running:
+            # If ready_event timed out, or if it was set due to an error, we need to clean up.
+            failure_reason = "Failed to connect and authenticate within the timeout period."
+            if not self.is_running:
+                failure_reason = "Connection failed during initialization."
+            self.close()
+            raise TimeoutError(failure_reason)
+
+    def _signal_handler(self, signum, frame):
+        print(f"\nSignal {signum} received, initiating shutdown...")
+        self.close()
 
     def _default_on_event(self, event_data):
-        """Default event handler that prints new messages."""
-        if event_data.get("opcode") == 128: # New message
-             print(f"\n[New Message Received] Event: {json.dumps(event_data, indent=2, ensure_ascii=False)}\n")
+        opcode = event_data.get("opcode")
+        if opcode == 128:
+            print(f"\n[New Message Received] Event: {json.dumps(event_data, indent=2, ensure_ascii=False)}\n")
+        elif opcode is not None:
+            print(f"\n[Server Event Received] Event (Opcode {opcode}): {json.dumps(event_data, indent=2, ensure_ascii=False)}\n")
         else:
-             print(f"\n[Event Received] Event: {json.dumps(event_data, indent=2, ensure_ascii=False)}\n")
+            print(f"\n[Unknown Event Received] Event: {json.dumps(event_data, indent=2, ensure_ascii=False)}\n")
 
-    def _connect(self):
-        """Establishes the WebSocket connection, authenticates, and starts listening."""
-        if self.is_running:
-            print("Already connected.")
-            return
+    def _start_ioloop(self):
+        if self.ioloop_thread is not None: return
+        self.ioloop = tornado.ioloop.IOLoop()
+        self.ioloop_thread = threading.Thread(target=self.ioloop.start, daemon=True)
+        self.ioloop.add_callback(self._connect_and_run)
+        self.ioloop_thread.start()
 
-        print("Connecting...")
-        self.is_running = True
-        self.ws = websocket.create_connection(self.ws_url)
-        print("Connected to WebSocket.")
+    @tornado.gen.coroutine
+    def _connect_and_run(self):
+        """Main async task: connects, launches listener, authenticates, and signals readiness."""
+        try:
+            print("Connecting...")
+            self.ws = yield tornado.websocket.websocket_connect(self.ws_url)
+            self.is_running = True
+            print("Connected to WebSocket.")
+            
+            # CRITICAL FIX: Start listener BEFORE sending any commands that expect a response.
+            self.ioloop.add_callback(self._listener_loop_async)
+            
+            # Perform startup sequence using fully async methods
+            yield self._handshake_async()
+            yield self._authenticate_async()
+            
+            # Start heartbeat
+            self.heartbeat_callback = tornado.ioloop.PeriodicCallback(self._send_heartbeat, 5000)
+            self.heartbeat_callback.start()
+            
+            print("API is online and ready.")
+            self.ready_event.set() # Unblock the __init__ constructor
 
-        self.listener_thread = threading.Thread(target=self._listener_loop, daemon=True)
-        self.listener_thread.start()
-
-        self._handshake()
-        self._authenticate()
-
-        self.heartbeat_thread = threading.Thread(target=self._heartbeat_loop, daemon=True)
-        self.heartbeat_thread.start()
-        print("API is online and ready.")
-
-    def _close(self):
-        """Closes the WebSocket connection and stops all background threads."""
-        if not self.is_running:
-            return
+        except Exception as e:
+            print(f"An error occurred during connection setup: {e}")
+            self.is_running = False
+            self.ready_event.set() # Unblock constructor on failure to avoid deadlock
         
+    @tornado.gen.coroutine
+    def _listener_loop_async(self):
+        """Asynchronously listens for all incoming messages."""
+        try:
+            while self.is_running:
+                message = yield self.ws.read_message()
+                if message is None:
+                    if self.is_running:
+                        print("Connection closed by server.")
+                    break
+                self._process_message(message)
+        except tornado.websocket.WebSocketClosedError:
+             if self.is_running: print("Listener loop terminated: WebSocket closed.")
+        except Exception as e:
+            if self.is_running: print(f"An error occurred in the listener loop: {e}")
+        finally:
+            self.is_running = False
+    
+    # ### FIXED METHOD ###
+    def _process_message(self, message):
+        """Processes a raw message, dispatching to sync/async waiters or event handlers."""
+        try:
+            data = json.loads(message)
+            
+            if data.get("cmd") == 1:
+                seq_id = data.get("seq")
+                with self.response_lock:
+                    # FIX: Use .get() instead of .pop(). We find the request but leave it
+                    # in the dictionary for the original sender thread to retrieve.
+                    pending_request = self.pending_responses.get(seq_id)
+                
+                if pending_request:
+                    response_payload = data.get("payload")
+                    if "event" in pending_request: # From a sync call
+                        # FIX: Update the 'response' value in the shared dictionary.
+                        pending_request["response"] = response_payload
+                        # FIX: Signal the waiting thread that the data is ready.
+                        pending_request["event"].set()
+                    elif "future" in pending_request: # From an async call
+                        # The logic for async futures is slightly different, we can resolve it directly.
+                        # We still pop it to ensure cleanup.
+                        with self.response_lock:
+                            self.pending_responses.pop(seq_id, None)
+                        pending_request["future"].set_result(response_payload)
+            else:
+                # This is a server-push event, not a response to a command.
+                if self.on_event:
+                    self.ioloop.run_in_executor(None, self.on_event, data)
+        except Exception as e:
+            print(f"Error processing message: {e}")
+
+    def close(self):
+        if not self.is_running and self.ioloop is None: return
         print("Closing connection...")
         self.is_running = False
-        if self.ws:
-            self.ws.close()
-        # Threads will exit because self.is_running is False
+
+        if self.ioloop:
+            self.ioloop.add_callback(self._shutdown_async)
+
+        if self.ioloop_thread and self.ioloop_thread.is_alive():
+            self.ioloop_thread.join(timeout=5)
+        
+        self.ioloop = None
+        self.ioloop_thread = None
         print("Connection closed.")
 
-    def _send_command(self, opcode: int, payload: dict, wait_for_response: bool = True, timeout: int = 10):
-        """
-        Internal method to construct and send a command to the WebSocket server.
-        """
-        if not self.is_running or not self.ws:
-            raise ConnectionError("Not connected to WebSocket.")
-            
-        seq_id = next(self.seq_counter)
-        command = {
-            "ver": 11,
-            "cmd": 0,
-            "seq": seq_id,
-            "opcode": opcode,
-            "payload": payload
-        }
-        
-        event = None
-        if wait_for_response:
-            event = threading.Event()
-            with self.response_lock:
-                self.pending_responses[seq_id] = {"event": event, "response": None}
-
-        self.ws.send(json.dumps(command))
-
-        if wait_for_response:
-            is_set = event.wait(timeout)
-            with self.response_lock:
-                response_data = self.pending_responses.pop(seq_id, {}).get("response")
-            
-            if not is_set:
-                raise TimeoutError(f"Request (opcode: {opcode}, seq: {seq_id}) timed out.")
-            return response_data
-        return None
-
-    def _listener_loop(self):
-        """Listens for incoming messages and dispatches them."""
-        while self.is_running:
-            try:
-                message = self.ws.recv()
-                data = json.loads(message)
-
-                if data.get("cmd") == 1:  # This is a response to a command
-                    seq_id = data.get("seq")
-                    with self.response_lock:
-                        if seq_id in self.pending_responses:
-                            self.pending_responses[seq_id]["response"] = data.get("payload")
-                            self.pending_responses[seq_id]["event"].set()
-                else: # This is a server-pushed event (cmd: 0)
-                    if self.on_event:
-                        self.on_event(data)
-
-            except (websocket.WebSocketConnectionClosedException, ConnectionResetError):
-                self._connect()
-            except Exception as e:
-                print(f"An error occurred in the listener thread: {e}")
-
-    def _heartbeat_loop(self):
-        """Sends a heartbeat every 5 seconds to keep the connection alive."""
-        while self.is_running:
-            try:
-                self._send_command(1, {"interactive": False})
-                time.sleep(5)
-            except (ConnectionError, TimeoutError, websocket.WebSocketException):
-                # The main listener will handle the disconnect
-                break
+    @tornado.gen.coroutine
+    def _shutdown_async(self):
+        if self.heartbeat_callback: self.heartbeat_callback.stop()
+        if self.ws: self.ws.close()
+        # Give a moment for tasks to finish before stopping the loop
+        self.ioloop.call_later(0.1, self.ioloop.stop)
     
-    def _handshake(self):
-        """Performs the initial handshake (opcode 6)."""
+    # --- ASYNC INTERNAL COMMANDS (for setup) ---
+
+    @tornado.gen.coroutine
+    def send_command_async(self, opcode: int, payload: dict, timeout: int = 10):
+        """Async-native command sender for internal use. Uses Tornado Futures."""
+        if not self.is_running: raise ConnectionError("Not connected.")
+        
+        seq_id = next(self.seq_counter)
+        command = {"ver": 11, "cmd": 0, "seq": seq_id, "opcode": opcode, "payload": payload}
+        
+        future = tornado.gen.Future()
+        with self.response_lock:
+            self.pending_responses[seq_id] = {"future": future}
+
+        try:
+            yield self.ws.write_message(json.dumps(command))
+            # The async future handler in _process_message already pops, so this is clean.
+            response = yield tornado.gen.with_timeout(
+                self.ioloop.time() + timeout,
+                future
+            )
+            raise tornado.gen.Return(response)
+        except tornado.gen.TimeoutError:
+            # Cleanup on timeout
+            with self.response_lock:
+                self.pending_responses.pop(seq_id, None)
+            raise TimeoutError(f"Async request (opcode: {opcode}, seq: {seq_id}) timed out.")
+
+    @tornado.gen.coroutine
+    def _handshake_async(self):
         print("Performing handshake...")
         payload = {"userAgent": self.user_agent, "deviceId": ""}
-        self._send_command(6, payload)
+        yield self.send_command_async(self.OPCODE_MAP['HANDSHAKE'], payload)
         print("Handshake successful.")
 
-    def _authenticate(self):
-        """Performs authentication and initial sync (opcode 19)."""
+    @tornado.gen.coroutine
+    def _authenticate_async(self):
         print("Authenticating...")
         payload = {
             "interactive": True, "token": self.auth_token,
             "chatsSync": 0, "contactsSync": 0, "presenceSync": 0,
             "draftsSync": 0, "chatsCount": 50
         }
-        response = self._send_command(19, payload)
+        response = yield self.send_command_async(self.OPCODE_MAP['AUTHENTICATE'], payload)
         print(f"Authentication successful. User: {response['profile']['contact']['names'][0]['name']}")
-        return response
+        self.user = response['profile']
 
-    # --- Public API Methods ---
+    @tornado.gen.coroutine
+    def _send_heartbeat(self):
+        if not self.is_running: return
+        try:
+            # Heartbeat doesn't need a response, so wait_for_response=False is correct
+            self.send_command(self.OPCODE_MAP['HEARTBEAT'], {"interactive": False}, wait_for_response=False)
+        except tornado.websocket.WebSocketClosedError:
+            print("Heartbeat failed: WebSocket is closed.")
+            self.is_running = False
+        except Exception as e:
+            # Catch other potential errors during send
+            if self.is_running:
+                print(f"Heartbeat failed with error: {e}")
+                self.is_running = False
 
+    # ### FIXED METHOD ###
+    def send_command(self, opcode: int, payload: dict, wait_for_response: bool = True, timeout: int = 10):
+        """Synchronous bridge to the async world for external callers."""
+        if not self.is_running: raise ConnectionError("Not connected to WebSocket.")
+            
+        seq_id = next(self.seq_counter)
+        command = {"ver": 11, "cmd": 0, "seq": seq_id, "opcode": opcode, "payload": payload}
+        
+        if not wait_for_response:
+            # If we don't wait, just schedule the send and return
+            self.ioloop.add_callback(self.ws.write_message, json.dumps(command))
+            return None
+
+        # Logic for waiting for a response
+        event = threading.Event()
+        with self.response_lock:
+            self.pending_responses[seq_id] = {"event": event, "response": None}
+
+        # Schedule the send operation on the IOLoop
+        self.ioloop.add_callback(self.ws.write_message, json.dumps(command))
+        
+        # Block this thread until the event is set by the IOLoop thread or timeout occurs
+        is_set = event.wait(timeout)
+        
+        # FIX: Now that we're awake, we are responsible for popping the request.
+        # This is thread-safe because the receiver thread will not pop it.
+        with self.response_lock:
+            pending_request = self.pending_responses.pop(seq_id, None)
+
+        if not is_set:
+            raise TimeoutError(f"Request (opcode: {opcode}, seq: {seq_id}) timed out after {timeout} seconds.")
+        
+        if not pending_request:
+            # This is a rare edge case, but could happen if the response arrived
+            # just as the timeout occurred. It's safer to handle it.
+            raise RuntimeError(f"Response for request (seq: {seq_id}) was lost.")
+        
+        return pending_request.get("response")
+
+    # --- Public API Methods (Interface remains unchanged) ---
     def send_message(self, chat_id: int, text: str):
-        """
-        Sends a message to a specific chat. This is a fire-and-forget operation.
-        The confirmation comes as a push event (opcode 128).
-
-        Args:
-            chat_id (int): The ID of the chat or dialog to send the message to.
-            text (str): The message text.
-        """
-        # The 'cid' is a client-generated ID, a millisecond timestamp is perfect.
         client_message_id = int(time.time() * 1000)
         payload = {
             "chatId": chat_id,
-            "message": {
-                "text": text,
-                "cid": client_message_id,
-                "elements": [], # For markdown/formatting
-                "attaches": []  # For attachments
-            },
+            "message": {"text": text, "cid": client_message_id, "elements": [], "attaches": []},
             "notify": True
         }
-        # This command doesn't get a direct response, so we don't wait.
-        self._send_command(64, payload, wait_for_response=False)
+        self.send_command(self.OPCODE_MAP['SEND_MESSAGE'], payload, wait_for_response=False)
         print(f"Sent message to chat {chat_id} with cid {client_message_id}")
 
     def get_history(self, chat_id: int, count: int = 30, from_timestamp: int = None):
-        """
-        Retrieves the message history for a specific chat.
-
-        Args:
-            chat_id (int): The ID of the chat.
-            count (int, optional): The number of messages to retrieve. Defaults to 30.
-            from_timestamp (int, optional): Unix timestamp in ms to fetch messages from.
-                                            Defaults to the current time.
-
-        Returns:
-            dict: The response payload containing the list of messages.
-        """
-        if from_timestamp is None:
-            from_timestamp = int(time.time() * 1000)
-            
-        payload = {
-            "chatId": chat_id,
-            "from": from_timestamp,
-            "forward": 0,
-            "backward": count,
-            "getMessages": True
-        }
-        return self._send_command(49, payload)
+        if from_timestamp is None: from_timestamp = int(time.time() * 1000)
+        payload = {"chatId": chat_id, "from": from_timestamp, "forward": 0, "backward": count, "getMessages": True}
+        return self.send_command(self.OPCODE_MAP['GET_HISTORY'], payload)
 
     def subscribe_to_chat(self, chat_id: int, subscribe: bool = True):
-        """
-        Subscribes or unsubscribes to real-time events from a chat.
-        You must be subscribed to a chat to receive new messages.
-
-        Args:
-            chat_id (int): The ID of the chat.
-            subscribe (bool, optional): True to subscribe, False to unsubscribe. Defaults to True.
-        """
         payload = {"chatId": chat_id, "subscribe": subscribe}
         status = "Subscribed to" if subscribe else "Unsubscribed from"
+        response = self.send_command(self.OPCODE_MAP['SUBSCRIBE_TO_CHAT'], payload)
         print(f"{status} chat {chat_id}")
-        return self._send_command(75, payload)
+        return response
 
     def mark_as_read(self, chat_id: int, message_id: str):
-        """
-        Marks a message and everything before it as read in a chat.
-
-        Args:
-            chat_id (int): The ID of the chat.
-            message_id (str): The server-assigned ID of the message to mark as read.
-        """
-        payload = {
-            "type": "READ_MESSAGE",
-            "chatId": chat_id,
-            "messageId": message_id,
-            "mark": int(time.time() * 1000)
-        }
-        return self._send_command(50, payload)
+        payload = {"type": "READ_MESSAGE", "chatId": chat_id, "messageId": message_id, "mark": int(time.time() * 1000)}
+        return self.send_command(self.OPCODE_MAP['MARK_AS_READ'], payload)
     
     def get_contact_details(self, contact_ids: list):
-        """
-        Retrieves profile information for a list of contact IDs.
-
-        Args:
-            contact_ids (list): A list of integer user IDs.
-
-        Returns:
-            dict: The response payload containing a list of contact profile objects.
-        """
         payload = {"contactIds": contact_ids}
-        return self._send_command(32, payload)
+        return self.send_command(self.OPCODE_MAP['GET_CONTACT_DETAILS'], payload)
     
     def send_generic_command(self, command_name: str, payload: dict, wait_for_response: bool = True, timeout: int = 10):
-            """
-            Sends a command to the server using its human-readable name.
-
-            Args:
-                command_name (str): The name of the command. Must be a key in MaxAPI.OPCODE_MAP.
-                payload (dict): The data payload for the command.
-                wait_for_response (bool, optional): Whether to wait for a server response. Defaults to True.
-                timeout (int, optional): How long to wait for a response in seconds. Defaults to 10.
-
-            Returns:
-                dict or None: The response payload from the server, or None if wait_for_response is False.
-            
-            Raises:
-                ValueError: If the command_name is not found in the OPCODE_MAP.
-            """
-            if command_name not in self.OPCODE_MAP:
-                raise ValueError(f"Unknown command name '{command_name}'. Valid names are: {list(self.OPCODE_MAP.keys())}")
-            
-            opcode = self.OPCODE_MAP[command_name]
-            return self._send_command(opcode, payload, wait_for_response, timeout)
+        command_name_upper = command_name.upper()
+        if command_name_upper not in self.OPCODE_MAP:
+            raise ValueError(f"Unknown command name '{command_name}'. Valid names are: {list(self.OPCODE_MAP.keys())}")
+        opcode = self.OPCODE_MAP[command_name_upper]
+        return self.send_command(opcode, payload, wait_for_response, timeout)
