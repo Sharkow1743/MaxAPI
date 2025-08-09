@@ -35,7 +35,7 @@ class MaxAPI:
             on_event (callable, optional): A callback function to handle server-push events.
                                            It receives one argument: the event data dictionary.
         """
-        self.auth_token = auth_token
+        self.token = auth_token
         self.ws_url = "wss://ws-api.oneme.ru/websocket"
         self.user_agent = {
             "deviceType": "WEB", "locale": "ru", "deviceLocale": "ru",
@@ -153,10 +153,9 @@ class MaxAPI:
                     pending_request = self.pending_responses.get(seq_id)
                 
                 if pending_request:
-                    response_payload = data.get("payload")
                     if "event" in pending_request: # From a sync call
                         # FIX: Update the 'response' value in the shared dictionary.
-                        pending_request["response"] = response_payload
+                        pending_request["response"] = data
                         # FIX: Signal the waiting thread that the data is ready.
                         pending_request["event"].set()
                     elif "future" in pending_request: # From an async call
@@ -164,7 +163,7 @@ class MaxAPI:
                         # We still pop it to ensure cleanup.
                         with self.response_lock:
                             self.pending_responses.pop(seq_id, None)
-                        pending_request["future"].set_result(response_payload)
+                        pending_request["future"].set_result(data)
             else:
                 # This is a server-push event, not a response to a command.
                 if self.on_event:
@@ -233,11 +232,12 @@ class MaxAPI:
     def _authenticate_async(self):
         print("Authenticating...")
         payload = {
-            "interactive": True, "token": self.auth_token,
+            "interactive": True, "token": self.token,
             "chatsSync": 0, "contactsSync": 0, "presenceSync": 0,
             "draftsSync": 0, "chatsCount": 50
         }
         response = yield self.send_command_async(self.OPCODE_MAP['AUTHENTICATE'], payload)
+        response = response['payload']
         print(f"Authentication successful. User: {response['profile']['contact']['names'][0]['name']}")
         self.user = response['profile']
 
@@ -296,13 +296,18 @@ class MaxAPI:
         return pending_request.get("response")
 
     # --- Public API Methods (Interface remains unchanged) ---
-    def send_message(self, chat_id: int, text: str):
+    def send_message(self, chat_id: int, text: str, reply_id: int | None = None):
         client_message_id = int(time.time() * 1000)
         payload = {
             "chatId": chat_id,
             "message": {"text": text, "cid": client_message_id, "elements": [], "attaches": []},
             "notify": True
         }
+        if reply_id:
+            payload["message"]["link"] = {
+                "type": "REPLY",
+                "messageId": reply_id
+            }
         self.send_command(self.OPCODE_MAP['SEND_MESSAGE'], payload, wait_for_response=False)
         print(f"Sent message to chat {chat_id} with cid {client_message_id}")
 
@@ -332,3 +337,38 @@ class MaxAPI:
             raise ValueError(f"Unknown command name '{command_name}'. Valid names are: {list(self.OPCODE_MAP.keys())}")
         opcode = self.OPCODE_MAP[command_name_upper]
         return self.send_command(opcode, payload, wait_for_response, timeout)
+    
+    def get_video(self, id):
+        video_info = api.send_command(83, {"videoId": id, "token": self.token})
+        video_info = video_info['payload']
+        url = video_info.get('MP4_1080') or video_info.get('MP4_720')
+        if not url: return None
+
+        headers = {
+            'Host': 'vd526.okcdn.ru',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:141.0) Gecko/20100101 Firefox/141.0',
+            'Accept': 'video/webm,video/ogg,video/*;q=0.9,application/ogg;q=0.7,audio/*;q=0.6,*/*;q=0.5',
+            'Accept-Language': 'ru-RU,ru;q=0.8,en-US;q=0.5,en;q=0.3',
+            'Connection': 'keep-alive',
+            'Sec-Fetch-Dest': 'video',
+            'Sec-Fetch-Mode': 'no-cors',
+            'Sec-Fetch-Site': 'cross-site',
+        }
+        
+        cookies = { 'tstc': 'p' }
+
+        with requests.get(url, headers=headers, cookies=cookies, stream=True, timeout=30) as r:
+            r.raise_for_status()
+
+            content_type = r.headers.get('content-type')
+            if 'video' not in content_type:
+                return None
+            
+            video_buffer = io.BytesIO()
+            
+            for chunk in r.iter_content(chunk_size=8192):
+                video_buffer.write(chunk)
+            
+            video_buffer.seek(0)
+
+        return video_buffer
