@@ -259,45 +259,52 @@ class MaxAPI:
 
     # ### FIXED METHOD ###
     def send_command(self, opcode: int, payload: dict, wait_for_response: bool = True, timeout: int = 10):
-        """Synchronous bridge to the async world for external callers."""
-        if not self.is_running: raise ConnectionError("Not connected to WebSocket.")
-            
-        seq_id = next(self.seq_counter)
-        command = {"ver": 11, "cmd": 0, "seq": seq_id, "opcode": opcode, "payload": payload}
-        
-        if not wait_for_response:
-            # If we don't wait, just schedule the send and return
-            self.ioloop.add_callback(self.ws.write_message, json.dumps(command))
-            return None
+        """Synchronous bridge to the async world for external callers with retries."""
+        max_attempts = 3
+        attempt = 0
+        while attempt < max_attempts:
+            attempt += 1
+            if not self.is_running:
+                self._reconnect()
+                if not self.is_running:
+                    raise ConnectionError("Unable to reconnect to WebSocket.")
+            try:
+                seq_id = next(self.seq_counter)
+                command = {"ver": 11, "cmd": 0, "seq": seq_id, "opcode": opcode, "payload": payload}
+                if not wait_for_response:
+                    self.ioloop.add_callback(self.ws.write_message, json.dumps(command))
+                    return None
+                event = threading.Event()
+                with self.response_lock:
+                    self.pending_responses[seq_id] = {"event": event, "response": None}
+                self.ioloop.add_callback(self.ws.write_message, json.dumps(command))
+                is_set = event.wait(timeout)
+                with self.response_lock:
+                    pending_request = self.pending_responses.pop(seq_id, None)
+                if not is_set:
+                    raise TimeoutError(f"Request (opcode: {opcode}, seq: {seq_id}) timed out after {timeout} seconds.")
+                if not pending_request:
+                    raise RuntimeError(f"Response for request (seq: {seq_id}) was lost.")
+                return pending_request.get("response")
+            except (ConnectionError, tornado.websocket.WebSocketClosedError):
+                self._reconnect()
+            except Exception:
+                if attempt == max_attempts:
+                    raise
+                # Small delay before retrying
+                time.sleep(1)
 
-        # Logic for waiting for a response
-        event = threading.Event()
-        with self.response_lock:
-            self.pending_responses[seq_id] = {"event": event, "response": None}
-
-        # Schedule the send operation on the IOLoop
-        self.ioloop.add_callback(self.ws.write_message, json.dumps(command))
-        
-        # Block this thread until the event is set by the IOLoop thread or timeout occurs
-        is_set = event.wait(timeout)
-        
-        # FIX: Now that we're awake, we are responsible for popping the request.
-        # This is thread-safe because the receiver thread will not pop it.
-        with self.response_lock:
-            pending_request = self.pending_responses.pop(seq_id, None)
-
-        if not is_set:
-            raise TimeoutError(f"Request (opcode: {opcode}, seq: {seq_id}) timed out after {timeout} seconds.")
-        
-        if not pending_request:
-            # This is a rare edge case, but could happen if the response arrived
-            # just as the timeout occurred. It's safer to handle it.
-            raise RuntimeError(f"Response for request (seq: {seq_id}) was lost.")
-        
-        return pending_request.get("response")
+    def _reconnect(self):
+        print("Attempting to reconnect to WebSocket...")
+        self.close()
+        self._start_ioloop()
+        # Wait for re-initialization
+        if not self.ready_event.wait(timeout=10):
+            self.is_running = False
+            raise ConnectionError("Failed to reconnect after multiple attempts.")
 
     # --- Public API Methods (Interface remains unchanged) ---
-    def send_message(self, chat_id: int, text: str, reply_id: int | None = None):
+    def send_message(self, chat_id: int, text: str, reply_id: int | None = None, wait_for_response: bool = False):
         client_message_id = int(time.time() * 1000)
         payload = {
             "chatId": chat_id,
@@ -309,8 +316,8 @@ class MaxAPI:
                 "type": "REPLY",
                 "messageId": reply_id
             }
-        self.send_command(self.OPCODE_MAP['SEND_MESSAGE'], payload, wait_for_response=False)
         print(f"Sent message to chat {chat_id} with cid {client_message_id}")
+        return self.send_command(self.OPCODE_MAP['SEND_MESSAGE'], payload, wait_for_response=wait_for_response)
 
     def get_history(self, chat_id: int, count: int = 30, from_timestamp: int = None):
         if from_timestamp is None: from_timestamp = int(time.time() * 1000)
@@ -374,13 +381,14 @@ class MaxAPI:
 
         return video_buffer
     
-    def get_file(self, id):
-        file_info = self.send_command(88, {"fileId": id, "token": self.token})
+    def get_file(self, id, chat_id, msg_id):
+        file_info = self.send_command(88, {"fileId": id, "chatId": chat_id, "messageId": msg_id})
         file_info = file_info['payload']
         url = file_info.get('url')
         if not url: return None
 
         with requests.get(url, timeout=30) as r:
             file = r.content
+            file_name = r.headers['X-File-Name']
 
-        return file
+        return file, file_name
