@@ -73,7 +73,18 @@ api = MaxAPI(auth_token)
 
    To mark a specific message as read, use:
    ```python
-   api.mark_as_read(chat_id=12345678, message_id="MESSAGE_ID")
+   api.mark_as_read(chat_id=12345678, message_id="12345678")
+   ```
+
+5. **Getting video or file**
+
+   To get video, use:
+   ```python
+   api.get_video(id=12345678)
+   ```
+   To get file, use:
+   ```python
+   api.get_file(id=12345678, chat_id=12345678, msg_id="12345678")
    ```
 
 The chat ID is required for most operations. You can obtain it from the chat URL or through other means specific to your application.
