@@ -14,8 +14,8 @@ setup(
     download_url=f'https://github.com/Sharkow1743/MaxAPI/archive/v{version}.zip',
     packages=find_packages(),
     install_requires=[
-        'tornado==6.0.4',
-        'requests==2.31.0'
+        'tornado>=6.0.4',
+        'requests>=2.31.0'
     ],
     classifiers=[
         'Programming Language :: Python :: 3',
