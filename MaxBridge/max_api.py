@@ -6,7 +6,8 @@ import time
 import threading
 import itertools
 import signal
-from concurrent.futures import Future as ConcurrentFuture # Renamed to avoid conflict
+import requests
+import io
 
 class MaxAPI:
     """
@@ -339,7 +340,7 @@ class MaxAPI:
         return self.send_command(opcode, payload, wait_for_response, timeout)
     
     def get_video(self, id):
-        video_info = api.send_command(83, {"videoId": id, "token": self.token})
+        video_info = self.send_command(83, {"videoId": id, "token": self.token})
         video_info = video_info['payload']
         url = video_info.get('MP4_1080') or video_info.get('MP4_720')
         if not url: return None
@@ -372,3 +373,14 @@ class MaxAPI:
             video_buffer.seek(0)
 
         return video_buffer
+    
+    def get_file(self, id):
+        file_info = self.send_command(88, {"fileId": id, "token": self.token})
+        file_info = file_info['payload']
+        url = file_info.get('url')
+        if not url: return None
+
+        with requests.get(url, timeout=30) as r:
+            file = r.content
+
+        return file
