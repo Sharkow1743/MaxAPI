@@ -1,289 +1,118 @@
-### Неофициальная документация WebSocket API мессенджера MAX
-
-Версия: 1.1.0
-
-## Введение
-
-Это неофициальная документация WebSocket API для веб-приложения мессенджера MAX. Общение с сервером происходит через одно постоянное WebSocket-соединение. Клиент и сервер обмениваются JSON-сообщениями в специальном формате-конверте.
-
-### Ключевые особенности
-
--   **Протокол:** WebSocket
--   **Формат данных:** JSON
--   **Аутентификация:** Двухэтапная: `handshake` (рукопожатие), затем `authenticate` (аутентификация с токеном).
--   **Структура сообщений:** Используется общий конверт с полями `cmd`, `seq`, `opcode` и `payload`.
-
-## Информация о сервере
-
--   **Хост:** `ws-api.oneme.ru`
--   **Путь:** `/websocket`
--   **Протокол:** `wss`
--   **Описание:** Основной сервер для работы приложения.
+## op codes
+| code | action | description |
+|---|---|---|
+| 1 | [heartbeat](#heartbeat) | Keep connection alive (send every ~5-10 seconds) |
+| 6 | [handshake](#handshake) | Initiate connection; send as first message |
+| 19 | [authenticate](#authenticate) | User login; send as second message |
+| 32 | [get contact details](#get_contact_details) | Retrieve user contact info by ID |
+| 49 | [get history](#get_history) | Fetch chat history |
+| 50 | [mark as read](#mark_as_read) | Mark messages as read |
+| 64 | [send message](#send_message) | Send a new chat message |
+| 75 | [subscribe to chat](#subscribe_to_chat) | Subscribe to chat updates |
+| 83 | [get video](#get_video) | Get link to a video |
+| 88 | [get file](#get_file) | Get link to a file |
 
 ---
 
-## Структура сообщений
+### heartbeat
+Keeps the connection alive. Send approximately every 5-10 seconds.
 
-Все сообщения, как от клиента, так и от сервера, следуют общей структуре-конверту.
+#### Input
+```json
+{
+  "interactive": false
+}
+```
 
-### Общий конверт (JSON)
-
-| Поле    | Тип     | Описание                                                                                                                              |
-| :------ | :------ | :------------------------------------------------------------------------------------------------------------------------------------ |
-| `cmd`   | Integer | Тип команды: `0` (клиент -> сервер), `1` (сервер -> клиент, успех), `3` (сервер -> клиент, ошибка).                                    |
-| `seq`   | Integer | Порядковый номер запроса. Используется для сопоставления ответов с запросами.                                                        |
-| `opcode`| Integer | Целочисленный код, определяющий тип операции.                                                                                         |
-| `payload`| Object | Полезная нагрузка (данные), зависящая от `opcode`. **Всегда является JSON-объектом.**                                                     |
+#### Return
+```json
+null
+```
 
 ---
 
-## Операции (Клиент -> Сервер)
+### handshake
+Initial connection; must be sent first.
 
-Клиент отправляет запросы на сервер, используя `cmd: 0`.
+#### Input
+```json
+{
+  "userAgent": {
+    "deviceType": "WEB"
+  }
+}
+```
 
-### 1. Heartbeat (Пинг)
+#### Return
+```json
+null
+```
 
--   **Opcode:** `1`
--   **Описание:** Поддерживает соединение активным. Рекомендуется отправлять каждые 5-10 секунд.
--   **Поля `payload`:**
-    -   `interactive` (boolean): `false`, если отправляется в фоновом режиме.
--   **Пример запроса:**
-    ```json
-    {
-      "cmd": 0,
-      "seq": 1,
-      "opcode": 1,
-      "payload": {
-        "interactive": false
-      }
-    }
-    ```
+---
 
-### 2. Handshake (Рукопожатие)
+### authenticate
+Authenticate user; should be sent as second message.
 
--   **Opcode:** `6`
--   **Описание:** Инициация соединения. Должен быть отправлен первым сообщением.
--   **Поля `payload`:**
-    -   `userAgent` (object): Информация о клиенте.
-        - `deviceType` (string): Тип устройства, для веба — `"WEB"`.
--   **Пример запроса:**
-    ```json
-    {
-      "cmd": 0,
-      "seq": 2,
-      "opcode": 6,
-      "payload": {
-        "userAgent": {
-          "deviceType": "WEB"
+#### Input
+```json
+{
+  "interactive": true,
+  "token": "TOKEN",
+  "chatsSync": 0,
+  "contactsSync": 0,
+  "presenceSync": 0,
+  "draftsSync": 0,
+  "chatsCount": 40
+}
+```
+
+#### Return
+```json
+{
+  "profile": {
+    "profileOptions": [],
+    "contact": {
+      "accountStatus": 0,
+      "baseUrl": "https://i.oneme.ru/i?r=BUGhUou04b028GIQiF8sPj1EMoEg2OSnHLBfb-SHaZ9Ay-Ag1jAVh2Bw-LDi7511o7RRkJxj_ZGNkDUfe8dvEb24",
+      "names": [
+        {
+          "name": "TransferBot",
+          "firstName": "TransferBot",
+          "lastName": "",
+          "type": "ONEME"
         }
-      }
+      ],
+      "phone": 79965433117,
+      "options": ["TT", "ONEME"],
+      "photoId": 11549759,
+      "updateTime": 1754132721403,
+      "id": 13446207,
+      "baseRawUrl": "https://i.oneme.ru/i?r=BTE2sh_eZW7g8kugOdIm2Not2iYTW6GNe8IqlUN66AbY8T_9cY73tz0ujRAFtR8MPmY"
     }
-    ```
-
-### 3. Authenticate (Аутентификация)
-
--   **Opcode:** `19`
--   **Описание:** Аутентификация пользователя. Отправляется вторым сообщением, после `handshake`.
--   **Поля `payload`:**
-    -   `interactive` (boolean): `true` при активном взаимодействии.
-    -   `token` (string): Аутентификационный токен из `localStorage`.
-    -   `chatsSync`, `contactsSync`, `presenceSync`, `draftsSync` (integer): Timestamp'ы для синхронизации. `0` для полной загрузки.
-    -   `chatsCount` (integer): Количество чатов для начальной загрузки.
--   **Пример запроса:**
-    ```json
-    {
-      "cmd": 0,
-      "seq": 3,
-      "opcode": 19,
-      "payload": {
-        "interactive": true,
-        "token": "YOUR_AUTH_TOKEN",
-        "chatsSync": 0,
-        "contactsSync": 0,
-        "presenceSync": 0,
-        "draftsSync": 0,
-        "chatsCount": 40
-      }
-    }
-    ```
-
-### 4. Получить детали контакта
-
--   **Opcode:** `32`
--   **Описание:** Получить информацию о пользователе по его ID.
--   **Поля `payload`:**
-    -   `contactIds` (array of strings): Список ID контактов.
--   **Пример запроса:**
-    ```json
-    {
-      "cmd": 0,
-      "seq": 101,
-      "opcode": 32,
-      "payload": {
-        "contactIds": ["12345678"]
-      }
-    }
-    ```
-
-### 5. Получить историю сообщений
-
--   **Opcode:** `49`
--   **Описание:** Загрузка порции сообщений в чате.
--   **Поля `payload`:**
-    -   `chatId` (string): ID чата.
-    -   `from` (string): ID сообщения, от которого загружать историю.
-    -   `forward` (integer): Количество сообщений для загрузки "вперед" (новее).
-    -   `backward` (integer): Количество сообщений для загрузки "назад" (старше).
--   **Пример запроса:**
-    ```json
-    {
-      "cmd": 0,
-      "seq": 103,
-      "opcode": 76,
-      "payload": {
-        "chatId": "12345",
-        "from": "message_abc",
-        "forward": 0,
-        "backward": 50
-      }
-    }
-    ```
-
-### 6. Отметить сообщения как прочитанные
-
--   **Opcode:** `50`
--   **Описание:** Обновляет метку прочтения в чате.
--   **Поля `payload`:**
-    -   `chatId` (string): ID чата.
-    -   `messageId` (string): ID последнего прочитанного сообщения.
-    -   `mark` (integer): Timestamp этого сообщения.
-    -   `type` (string): `"READ_MESSAGE"`.
--   **Пример запроса:**
-    ```json
-    {
-      "cmd": 0,
-      "seq": 104,
-      "opcode": 50,
-      "payload": {
-        "chatId": "12345",
-        "messageId": "message_abc",
-        "mark": 1678886400000,
-        "type": "READ_MESSAGE"
-      }
-    }
-    ```
-
-### 7. Отправить сообщение
-
--   **Opcode:** `64`
--   **Описание:** Отправка текстового сообщения или медиа.
--   **Поля `payload`:**
-    -   `chatId` (string): ID чата.
-    -   `message` (object): Объект сообщения.
--   **Пример запроса:**
-    ```json
-    {
-      "cmd": 0,
-      "seq": 105,
-      "opcode": 152,
-      "payload": {
-        "chatId": "12345",
-        "message": {
-          "cid": 1678886400000,
-          "text": "Привет!",
-          "elements": [],
-          "attaches": []
-        }
-      }
-    }
-    ```
-
-### 8. Подписаться на обновления чата
-
--   **Opcode:** `75`
--   **Описание:** Подписывает клиента на получение обновлений для конкретного чата (например, статусы "печатает", новые сообщения).
--   **Поля `payload`:**
-    -   `chatId` (string): ID чата.
-    -   `subscribe` (boolean): `true` для подписки, `false` для отписки.
--   **Пример запроса:**
-    ```json
-    {
-      "cmd": 0,
-      "seq": 106,
-      "opcode": 75,
-      "payload": {
-        "chatId": "12345",
-        "subscribe": true
-      }
-    }
-    ```
-
-### 9. Получить ссылку на видео
-
--   **Opcode:** `83`
--   **Описание:** Получить прямые ссылки на MP4-файлы для видео.
--   **Поля `payload`:**
-    -   `videoId` (string)
-    -   `chatId` (string)
-    -   `messageId` (string)
--   **Пример запроса:**
-    ```json
-    {
-      "cmd": 0,
-      "seq": 107,
-      "opcode": 60,
-      "payload": {
-        "videoId": "video_xyz",
-        "chatId": "12345",
-        "messageId": "message_abc"
-      }
-    }
-    ```
-
-### 10. Получить ссылку на файл
-
--   **Opcode:** `88`
--   **Описание:** Получить временную ссылку для скачивания файла.
--   **Поля `payload`:**
-    -   `fileId` (string)
-    -   `chatId` (string)
-    -   `messageId` (string)
--   **Пример запроса:**
-    ```json
-    {
-      "cmd": 0,
-      "seq": 108,
-      "opcode": 88,
-      "payload": {
-        "fileId": "file_xyz",
-        "chatId": "12345",
-        "messageId": "message_abc"
-      }
-    }
-    ```
+  },
+  "drafts": {
+    "chats": { "saved": {}, "discarded": {} },
+    "users": { "saved": {}, "discarded": {} }
+  },
+  "token": "TOKEN",
+  "videoChatHistory": false,
+  "calls": [],
+  "chats": [ /* chat list with details */ ],
+  "presence": { "13446207": { "seen": 1754258509, "on": "ON" } },
+  "config": { /* configuration settings */ }
+}
+```
 
 ---
 
-## Уведомления (Сервер -> Клиент)
+### get_contact_details
+Retrieve user contact info by their user ID.
 
-Сервер асинхронно отправляет уведомления клиенту, используя `cmd: 0`.
+#### Input
+```json
+{}
+```
 
-### 1. Полная синхронизация (NOTIF_SYNC)
-
--   **Opcode:** `6`
--   **Описание:** Отправляется ответом после успешной аутентификации. Содержит полное начальное состояние аккаунта.
--   **Поля `payload`:** 
-    - `profile` 
-    - `config`
-    - `contacts`
-    - `chats`
-    - `messages`
-
-### 2. Новое сообщение (NOTIF_MESSAGE_NEW)
-
--   **Opcode:** `128`
--   **Описание:** Уведомление о новом сообщении.
--   **Поля `payload`:** 
-    - `chatId`
-    - `message`
-    - `chat`
+#### Return
+```json
+null
