@@ -8,6 +8,7 @@ import itertools
 import signal
 import requests
 import io
+from .md import parse_markdown
 
 class MaxAPI:
     """
@@ -304,18 +305,23 @@ class MaxAPI:
             raise ConnectionError("Failed to reconnect after multiple attempts.")
 
     # --- Public API Methods (Interface remains unchanged) ---
-    def send_message(self, chat_id: int, text: str, reply_id: int | None = None, wait_for_response: bool = False):
+    def send_message(self, chat_id: int, text: str, reply_id: int | None = None, wait_for_response: bool = False, format: bool = False):
         client_message_id = int(time.time() * 1000)
+
         payload = {
             "chatId": chat_id,
             "message": {"text": text, "cid": client_message_id, "elements": [], "attaches": []},
             "notify": True
         }
+
         if reply_id:
             payload["message"]["link"] = {
                 "type": "REPLY",
                 "messageId": reply_id
             }
+        if format:
+            payload["message"]["elements"], payload["message"]["text"] = parse_markdown(text)
+        
         print(f"Sent message to chat {chat_id} with cid {client_message_id}")
         return self.send_command(self.OPCODE_MAP['SEND_MESSAGE'], payload, wait_for_response=wait_for_response)
 
