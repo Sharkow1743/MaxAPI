@@ -20,9 +20,10 @@ def parse_markdown(text):
         )
         
         format = {
-            "type": md_type,
+
             "from": actual_offset,
             "length": len(match.group(1)),
+            "attributes": {}
         }
         if md_type == 'LINK':
             format['attributes']['url'] = match.group(2)
@@ -33,7 +34,7 @@ def parse_markdown(text):
     
     text = re.sub(r'\[(.*?)\]\((?P<url>.*?)\)', lambda m: process_match(m, "LINK"), text)
     text = re.sub(r'\*(.*?)\*', lambda m: process_match(m, "STRONG"), text)
-    text = re.sub(r'/(.*?)/', lambda m: process_match(m, "ITALIC"), text)
+    # text = re.sub(r'/(.*?)/', lambda m: process_match(m, "ITALIC"), text) # no italic yet
     text = re.sub(r'_(.*?)_', lambda m: process_match(m, "UNDERLINE"), text)
     
     return result, text.strip()

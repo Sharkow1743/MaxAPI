@@ -8,7 +8,7 @@ import itertools
 import signal
 import requests
 import io
-from .md import parse_markdown
+from md import parse_markdown
 
 class MaxAPI:
     """
