@@ -20,7 +20,7 @@ def parse_markdown(text):
         )
         
         format = {
-
+            "type": md_type,
             "from": actual_offset,
             "length": len(match.group(1)),
             "attributes": {}
