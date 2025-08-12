@@ -91,7 +91,7 @@ class MaxAPI:
         if self.ioloop_thread is not None: return
         self.ioloop = tornado.ioloop.IOLoop()
         self.ioloop_thread = threading.Thread(target=self.ioloop.start, daemon=True)
-        self.ioloop.add_callback(self._connect_forever)
+        self.ioloop.add_callback(self._connect_and_run)
         self.ioloop_thread.start()
 
     @tornado.gen.coroutine
@@ -244,7 +244,6 @@ class MaxAPI:
                 print(f"Heartbeat failed with error: {e}")
                 self.is_running = False
 
-    # ### FIXED METHOD ###
     def send_command(self, opcode: int, payload: dict, wait_for_response: bool = True, timeout: int = 10):
         """Synchronous bridge to the async world for external callers with retries."""
         max_attempts = 3
