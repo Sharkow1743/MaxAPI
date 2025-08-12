@@ -68,7 +68,6 @@ class MaxAPI:
         
         is_ready = self.ready_event.wait(timeout=20)
         if not is_ready or not self.is_running:
-            # If ready_event timed out, or if it was set due to an error, we need to clean up.
             failure_reason = "Failed to connect and authenticate within the timeout period."
             if not self.is_running:
                 failure_reason = "Connection failed during initialization."
@@ -92,36 +91,30 @@ class MaxAPI:
         if self.ioloop_thread is not None: return
         self.ioloop = tornado.ioloop.IOLoop()
         self.ioloop_thread = threading.Thread(target=self.ioloop.start, daemon=True)
-        self.ioloop.add_callback(self._connect_and_run)
+        self.ioloop.add_callback(self._connect_forever)
         self.ioloop_thread.start()
 
     @tornado.gen.coroutine
     def _connect_and_run(self):
         """Main async task: connects, launches listener, authenticates, and signals readiness."""
-        try:
-            print("Connecting...")
-            self.ws = yield tornado.websocket.websocket_connect(self.ws_url)
-            self.is_running = True
-            print("Connected to WebSocket.")
-            
-            # CRITICAL FIX: Start listener BEFORE sending any commands that expect a response.
-            self.ioloop.add_callback(self._listener_loop_async)
-            
-            # Perform startup sequence using fully async methods
-            yield self._handshake_async()
-            yield self._authenticate_async()
-            
-            # Start heartbeat
-            self.heartbeat_callback = tornado.ioloop.PeriodicCallback(self._send_heartbeat, 5000)
-            self.heartbeat_callback.start()
-            
-            print("API is online and ready.")
-            self.ready_event.set() # Unblock the __init__ constructor
+        while True:
+            try:
+                print("Connecting...")
+                self.ws = yield tornado.websocket.websocket_connect(self.ws_url)
+                self.is_running = True
+                print("Connected to WebSocket.")
+                self.ioloop.add_callback(self._listener_loop_async)
+                yield self._handshake_async()
+                yield self._authenticate_async()
 
-        except Exception as e:
-            print(f"An error occurred during connection setup: {e}")
-            self.is_running = False
-            self.ready_event.set() # Unblock constructor on failure to avoid deadlock
+                self.heartbeat_callback = tornado.ioloop.PeriodicCallback(self._send_heartbeat, 5000)
+                self.heartbeat_callback.start()
+                print("API is online and ready.")
+                self.ready_event.set()
+                break
+            except Exception as e:
+                print(f"Connection failed: {e}. Retrying in 5 seconds...")
+                yield tornado.gen.sleep(5)
         
     @tornado.gen.coroutine
     def _listener_loop_async(self):
@@ -141,7 +134,6 @@ class MaxAPI:
         finally:
             self.is_running = False
     
-    # ### FIXED METHOD ###
     def _process_message(self, message):
         """Processes a raw message, dispatching to sync/async waiters or event handlers."""
         try:
@@ -150,19 +142,13 @@ class MaxAPI:
             if data.get("cmd") == 1:
                 seq_id = data.get("seq")
                 with self.response_lock:
-                    # FIX: Use .get() instead of .pop(). We find the request but leave it
-                    # in the dictionary for the original sender thread to retrieve.
                     pending_request = self.pending_responses.get(seq_id)
                 
                 if pending_request:
-                    if "event" in pending_request: # From a sync call
-                        # FIX: Update the 'response' value in the shared dictionary.
+                    if "event" in pending_request:
                         pending_request["response"] = data
-                        # FIX: Signal the waiting thread that the data is ready.
                         pending_request["event"].set()
-                    elif "future" in pending_request: # From an async call
-                        # The logic for async futures is slightly different, we can resolve it directly.
-                        # We still pop it to ensure cleanup.
+                    elif "future" in pending_request:
                         with self.response_lock:
                             self.pending_responses.pop(seq_id, None)
                         pending_request["future"].set_result(data)
@@ -195,7 +181,7 @@ class MaxAPI:
         # Give a moment for tasks to finish before stopping the loop
         self.ioloop.call_later(0.1, self.ioloop.stop)
     
-    # --- ASYNC INTERNAL COMMANDS (for setup) ---
+    # --- ASYNC INTERNAL COMMANDS ---
 
     @tornado.gen.coroutine
     def send_command_async(self, opcode: int, payload: dict, timeout: int = 10):
