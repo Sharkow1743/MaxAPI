@@ -20,6 +20,8 @@ class MaxAPI:
     OPCODE_MAP = {
         'HEARTBEAT': 1,
         'HANDSHAKE': 6,
+        'SEND_VERTIFY_CODE': 17,
+        'CHECK_VERTIFY_CODE': 18,
         'AUTHENTICATE': 19,
         'GET_CONTACT_DETAILS': 32,
         'FIND_BY_PHONE_NUMBER': 46,
