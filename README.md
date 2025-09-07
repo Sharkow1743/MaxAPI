@@ -87,4 +87,25 @@ api = MaxAPI(auth_token)
    api.get_file(id=12345678, chat_id=12345678, msg_id="12345678")
    ```
 
+6. **Finding Contact by Phone Number:**
+
+   To find a contact by their phone number, use:
+   ```python
+   api.get_contact_by_phone(phone_number="+12345678901")
+   ```
+
+7. **Getting Chat by ID:**
+
+   To retrieve a specific chat by its ID, use:
+   ```python
+   api.get_chat_by_id(chat_id="12345678")
+   ```
+
+8. **Getting All Chats:**
+
+   To retrieve all available chats, use:
+   ```python
+   api.get_all_chats()
+   ```
+
 The chat ID is required for most operations. You can obtain it from the chat URL or through other means specific to your application.

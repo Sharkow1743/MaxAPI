@@ -342,7 +342,7 @@ class MaxAPI:
         payload = {"contactIds": contact_ids}
         return self.send_command(self.OPCODE_MAP['GET_CONTACT_DETAILS'], payload)
     
-    def get_conatct_by_phone(self, phone_number: str):
+    def get_contact_by_phone(self, phone_number: str):
         payload = {"phone": phone_number}
         return self.send_command(self.OPCODE_MAP['FIND_BY_PHONE_NUMBER'], payload)
     
