@@ -372,7 +372,7 @@ class MaxAPI:
             self.token = res['payload']['token']
         return res
     
-    def check_vertify_code(self, code: int):
+    def check_vertify_code(self, code: str):
         """Checks the verification code and completes authentication."""
         if not self.token:
             raise RuntimeError("Cannot check verification code. Please call send_vertify_code first.")
@@ -390,6 +390,7 @@ class MaxAPI:
             # Now that we have the permanent token, trigger the full authentication
             self.logger.info("Verification successful. Finalizing authentication...")
             self.ioloop.add_callback(self._authenticate_async)
+            return self.token
             
         return res
     
