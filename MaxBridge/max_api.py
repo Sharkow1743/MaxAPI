@@ -360,7 +360,9 @@ class MaxAPI:
             "type": "START_AUTH",
             "language": "ru"
 	    }
-        return self.send_command(self.OPCODE_MAP['SEND_VERTIFY_CODE'], payload)
+        res = self.send_command(self.OPCODE_MAP['SEND_VERTIFY_CODE'], payload)
+        self.token = res['token']
+        return res
     
     def check_vertify_code(self, code: int):
         payload = {
@@ -368,7 +370,9 @@ class MaxAPI:
             "verifyCode": code,
             "authTokenType": "CHECK_CODE"
         }
-        return self.send_command(self.OPCODE_MAP['CHECK_VERTIFY_CODE'], payload)
+        res = self.send_command(self.OPCODE_MAP['CHECK_VERTIFY_CODE'], payload)
+        self.token = res['token']
+        return res
     
     def send_generic_command(self, command_name: str, payload: dict, wait_for_response: bool = True, timeout: int = 10):
         command_name_upper = command_name.upper()
