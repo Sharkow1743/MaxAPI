@@ -31,7 +31,7 @@ class MaxAPI:
         'SUBSCRIBE_TO_CHAT': 75,
     }
 
-    def __init__(self, auth_token: str, on_event=None):
+    def __init__(self, auth_token: str = None, on_event=None):
         """
         Initializes the MaxAPI instance.
         This constructor will block until the connection is established and authenticated.
@@ -353,6 +353,22 @@ class MaxAPI:
     
     def get_all_chats(self):
         return self.chats
+    
+    def send_vertify_code(self, phone_number: str):
+        payload = {
+            "phone": phone_number,
+            "type": "START_AUTH",
+            "language": "ru"
+	    }
+        return self.send_command(self.OPCODE_MAP['SEND_VERTIFY_CODE'], payload)
+    
+    def check_vertify_code(self, code: int):
+        payload = {
+            "token": self.token,
+            "verifyCode": code,
+            "authTokenType": "CHECK_CODE"
+        }
+        return self.send_command(self.OPCODE_MAP['CHECK_VERTIFY_CODE'], payload)
     
     def send_generic_command(self, command_name: str, payload: dict, wait_for_response: bool = True, timeout: int = 10):
         command_name_upper = command_name.upper()
