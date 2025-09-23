@@ -382,14 +382,15 @@ class MaxAPI:
             "verifyCode": code,
             "authTokenType": "CHECK_CODE"
         }
-        res = self.send_command(self.OPCODE_MAP['CHECK_VERTIFY_CODE'], payload)
+        res = self.send_command(self.OPCODE_MAP['CHECK_VERTIFY_CODE'], payload, wait_for_response=True)
         
         # On success, a new, permanent token is issued.
         if 'payload' in res and 'token' in res['payload']:
             self.token = res['payload']['token']
             # Now that we have the permanent token, trigger the full authentication
             self.logger.info("Verification successful. Finalizing authentication...")
-            self.ioloop.add_callback(self._authenticate_async)
+            yield self._authenticate_async()
+            self.logger.info("API is online and ready.")
             return self.token
             
         return res
