@@ -370,6 +370,7 @@ class MaxAPI:
         # Temporarily store the token received for the code verification step
         if 'payload' in res and 'token' in res['payload']:
             self.token = res['payload']['token']
+            self.logger.info('Saved temp auth-token')
         return res
     
     def check_vertify_code(self, code: str):
@@ -385,11 +386,29 @@ class MaxAPI:
         res = self.send_command(self.OPCODE_MAP['CHECK_VERTIFY_CODE'], payload, wait_for_response=True)
         
         # On success, a new, permanent token is issued.
-        if 'payload' in res and 'token' in res['payload']:
-            self.token = res['payload']['token']
+        token = res['payload'].get('tokenAttrs', {}).get('LOGIN', {}).get('token')
+        if token:
+            self.token = token
             # Now that we have the permanent token, trigger the full authentication
             self.logger.info("Verification successful. Finalizing authentication...")
-            yield self._authenticate_async()
+
+            # Instead of run_sync, use proper async coordination
+            auth_event = threading.Event()
+            auth_result = [None]  # [exception or None]
+
+            def _run_authenticate():
+                try:
+                    future = self._authenticate_async()
+                    self.ioloop.add_future(future, lambda f: auth_event.set())
+                except Exception as e:
+                    auth_result[0] = e
+                    auth_event.set()
+
+            self.ioloop.add_callback(_run_authenticate)
+            auth_event.wait()
+            if auth_result[0] is not None:
+                raise auth_result[0]
+            
             self.logger.info("API is online and ready.")
             return self.token
             
