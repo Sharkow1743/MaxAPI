@@ -9,6 +9,7 @@ import signal
 import requests
 import io
 from .md import parse_markdown
+from tornado.httpclient import HTTPRequest
 
 class MaxAPI:
     """
@@ -100,7 +101,18 @@ class MaxAPI:
         while True:
             try:
                 print("Connecting...")
-                self.ws = yield tornado.websocket.websocket_connect(self.ws_url)
+                # Create a custom HTTPRequest with Origin header
+                request = HTTPRequest(
+                    url=self.ws_url,
+                    headers={
+                        "Origin": "https://web.max.ru",
+                        "User-Agent": self.user_agent["headerUserAgent"],
+                        "Sec-Fetch-Dest": "empty",
+                        "Sec-Fetch-Mode": "websocket",
+                        "Sec-Fetch-Site": "cross-site",
+                    }
+                )
+                self.ws = yield tornado.websocket.websocket_connect(request)
                 self.is_running = True
                 print("Connected to WebSocket.")
                 self.ioloop.add_callback(self._listener_loop_async)
@@ -212,7 +224,7 @@ class MaxAPI:
     @tornado.gen.coroutine
     def _handshake_async(self):
         print("Performing handshake...")
-        payload = {"userAgent": self.user_agent, "deviceId": ""}
+        payload = {"userAgent": self.user_agent, "deviceId": "a"}
         yield self.send_command_async(self.OPCODE_MAP['HANDSHAKE'], payload)
         print("Handshake successful.")
 
