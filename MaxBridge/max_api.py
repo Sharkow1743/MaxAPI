@@ -8,6 +8,7 @@ import itertools
 import signal
 import requests
 import io
+import logging
 from .md import parse_markdown
 from tornado.httpclient import HTTPRequest
 
@@ -20,21 +21,26 @@ class MaxAPI:
     OPCODE_MAP = {
         'HEARTBEAT': 1,
         'HANDSHAKE': 6,
+        'SEND_VERTIFY_CODE': 17,
+        'CHECK_VERTIFY_CODE': 18,
         'AUTHENTICATE': 19,
         'GET_CONTACT_DETAILS': 32,
+        'FIND_BY_PHONE_NUMBER': 46,
         'GET_HISTORY': 49,
         'MARK_AS_READ': 50,
         'SEND_MESSAGE': 64,
         'SUBSCRIBE_TO_CHAT': 75,
     }
 
-    def __init__(self, auth_token: str, on_event=None):
+    def __init__(self, auth_token: str = None, on_event=None):
         """
         Initializes the MaxAPI instance.
-        This constructor will block until the connection is established and authenticated.
         
         Args:
-            auth_token (str): The authentication token for the session.
+            auth_token (str, optional): The authentication token for the session. If provided,
+                                        the API will connect and authenticate automatically.
+                                        If not provided, the API will connect and wait for
+                                        manual authentication via send_vertify_code and check_vertify_code.
             on_event (callable, optional): A callback function to handle server-push events.
                                            It receives one argument: the event data dictionary.
         """
@@ -47,6 +53,7 @@ class MaxAPI:
             "appVersion": "25.7.13", "screen": "1080x1920 1.0x", "timezone": "Asia/Novosibirsk"
         }
         self.user = None
+        self.chats = {}
 
         self.ws = None
         self.ioloop = None
@@ -65,28 +72,28 @@ class MaxAPI:
         signal.signal(signal.SIGINT, self._signal_handler)
         signal.signal(signal.SIGTERM, self._signal_handler)
 
+        self.logger = logging.getLogger("MaxAPI")
+
         self._start_ioloop()
         
+        # We wait for the connection to be established, but not necessarily authenticated.
         is_ready = self.ready_event.wait(timeout=20)
-        if not is_ready or not self.is_running:
-            failure_reason = "Failed to connect and authenticate within the timeout period."
-            if not self.is_running:
-                failure_reason = "Connection failed during initialization."
+        if not is_ready:
             self.close()
-            raise TimeoutError(failure_reason)
+            raise TimeoutError("Failed to connect to WebSocket within the timeout period.")
 
     def _signal_handler(self, signum, frame):
-        print(f"\nSignal {signum} received, initiating shutdown...")
+        self.logger.info(f"\nSignal {signum} received, initiating shutdown...")
         self.close()
 
     def _default_on_event(self, event_data):
         opcode = event_data.get("opcode")
         if opcode == 128:
-            print(f"\n[New Message Received] Event: {json.dumps(event_data, indent=2, ensure_ascii=False)}\n")
+            self.logger.info(f"\n[New Message Received] Event: {json.dumps(event_data, indent=2, ensure_ascii=False)}\n")
         elif opcode is not None:
-            print(f"\n[Server Event Received] Event (Opcode {opcode}): {json.dumps(event_data, indent=2, ensure_ascii=False)}\n")
+            self.logger.info(f"\n[Server Event Received] Event (Opcode {opcode}): {json.dumps(event_data, indent=2, ensure_ascii=False)}\n")
         else:
-            print(f"\n[Unknown Event Received] Event: {json.dumps(event_data, indent=2, ensure_ascii=False)}\n")
+            self.logger.info(f"\n[Unknown Event Received] Event: {json.dumps(event_data, indent=2, ensure_ascii=False)}\n")
 
     def _start_ioloop(self):
         if self.ioloop_thread is not None: return
@@ -97,7 +104,7 @@ class MaxAPI:
 
     @tornado.gen.coroutine
     def _connect_and_run(self):
-        """Main async task: connects, launches listener, authenticates, and signals readiness."""
+        """Main async task: connects, launches listener, authenticates (if token exists), and signals readiness."""
         while True:
             try:
                 print("Connecting...")
@@ -114,18 +121,25 @@ class MaxAPI:
                 )
                 self.ws = yield tornado.websocket.websocket_connect(request)
                 self.is_running = True
-                print("Connected to WebSocket.")
+                self.logger.info("Connected to WebSocket.")
                 self.ioloop.add_callback(self._listener_loop_async)
                 yield self._handshake_async()
-                yield self._authenticate_async()
+                
+                # Only authenticate if a token was provided during initialization
+                if self.token:
+                    yield self._authenticate_async()
+                    self.logger.info("API is online and ready.")
+                else:
+                    self.logger.info("API is connected. Please authenticate using verification code methods.")
 
                 self.heartbeat_callback = tornado.ioloop.PeriodicCallback(self._send_heartbeat, 5000)
                 self.heartbeat_callback.start()
-                print("API is online and ready.")
+                
+                # Signal that the connection is ready for commands
                 self.ready_event.set()
                 break
             except Exception as e:
-                print(f"Connection failed: {e}. Retrying in 5 seconds...")
+                self.logger.warning(f"Connection failed: {e}. Retrying in 5 seconds...")
                 yield tornado.gen.sleep(5)
         
     @tornado.gen.coroutine
@@ -136,13 +150,13 @@ class MaxAPI:
                 message = yield self.ws.read_message()
                 if message is None:
                     if self.is_running:
-                        print("Connection closed by server.")
+                        self.logger.warning("Connection closed by server.")
                     break
                 self._process_message(message)
         except tornado.websocket.WebSocketClosedError:
-             if self.is_running: print("Listener loop terminated: WebSocket closed.")
+             if self.is_running: self.logger.warning("Listener loop terminated: WebSocket closed.")
         except Exception as e:
-            if self.is_running: print(f"An error occurred in the listener loop: {e}")
+            if self.is_running: self.logger.error(f"An error occurred in the listener loop: {e}")
         finally:
             self.is_running = False
     
@@ -169,11 +183,11 @@ class MaxAPI:
                 if self.on_event:
                     self.ioloop.run_in_executor(None, self.on_event, data)
         except Exception as e:
-            print(f"Error processing message: {e}")
+            self.logger.error(f"Error processing message: {e}")
 
     def close(self):
         if not self.is_running and self.ioloop is None: return
-        print("Closing connection...")
+        self.logger.info("Closing connection...")
         self.is_running = False
 
         if self.ioloop:
@@ -184,7 +198,7 @@ class MaxAPI:
         
         self.ioloop = None
         self.ioloop_thread = None
-        print("Connection closed.")
+        self.logger.info("Connection closed.")
 
     @tornado.gen.coroutine
     def _shutdown_async(self):
@@ -209,28 +223,30 @@ class MaxAPI:
 
         try:
             yield self.ws.write_message(json.dumps(command))
-            # The async future handler in _process_message already pops, so this is clean.
             response = yield tornado.gen.with_timeout(
                 self.ioloop.time() + timeout,
                 future
             )
             raise tornado.gen.Return(response)
         except tornado.gen.TimeoutError:
-            # Cleanup on timeout
             with self.response_lock:
                 self.pending_responses.pop(seq_id, None)
             raise TimeoutError(f"Async request (opcode: {opcode}, seq: {seq_id}) timed out.")
 
     @tornado.gen.coroutine
     def _handshake_async(self):
-        print("Performing handshake...")
-        payload = {"userAgent": self.user_agent, "deviceId": "a"}
+        self.logger.info("Performing handshake...")
+        payload = {"userAgent": self.user_agent, "deviceId":"asd"}
         yield self.send_command_async(self.OPCODE_MAP['HANDSHAKE'], payload)
-        print("Handshake successful.")
+        self.logger.info("Handshake successful.")
 
     @tornado.gen.coroutine
     def _authenticate_async(self):
-        print("Authenticating...")
+        self.logger.info("Authenticating...")
+        if not self.token:
+            self.logger.error("Authentication failed: No token available.")
+            return
+
         payload = {
             "interactive": True, "token": self.token,
             "chatsSync": 0, "contactsSync": 0, "presenceSync": 0,
@@ -238,22 +254,27 @@ class MaxAPI:
         }
         response = yield self.send_command_async(self.OPCODE_MAP['AUTHENTICATE'], payload)
         response = response['payload']
-        print(f"Authentication successful. User: {response['profile']['contact']['names'][0]['name']}")
+        self.logger.info(f"Authentication successful. User: {response['profile']['contact']['names'][0]['name']}")
         self.user = response['profile']
+        chats = {}
+        for item in response['chats']:
+            item_id = str(item.get('id'))
+            new_item = item.copy()
+            del new_item['id']
+            chats[item_id] = new_item
+        self.chats = chats
 
     @tornado.gen.coroutine
     def _send_heartbeat(self):
         if not self.is_running: return
         try:
-            # Heartbeat doesn't need a response, so wait_for_response=False is correct
             self.send_command(self.OPCODE_MAP['HEARTBEAT'], {"interactive": False}, wait_for_response=False)
         except tornado.websocket.WebSocketClosedError:
-            print("Heartbeat failed: WebSocket is closed.")
+            self.logger.warning("Heartbeat failed: WebSocket is closed.")
             self.is_running = False
         except Exception as e:
-            # Catch other potential errors during send
             if self.is_running:
-                print(f"Heartbeat failed with error: {e}")
+                self.logger.error(f"Heartbeat failed with error: {e}")
                 self.is_running = False
 
     def send_command(self, opcode: int, payload: dict, wait_for_response: bool = True, timeout: int = 10):
@@ -289,14 +310,12 @@ class MaxAPI:
             except Exception:
                 if attempt == max_attempts:
                     raise
-                # Small delay before retrying
                 time.sleep(1)
 
     def _reconnect(self):
-        print("Attempting to reconnect to WebSocket...")
+        self.logger.info("Attempting to reconnect to WebSocket...")
         self.close()
         self._start_ioloop()
-        # Wait for re-initialization
         if not self.ready_event.wait(timeout=10):
             self.is_running = False
             raise ConnectionError("Failed to reconnect after multiple attempts.")
@@ -319,7 +338,7 @@ class MaxAPI:
         if format:
             payload["message"]["elements"], payload["message"]["text"] = parse_markdown(text)
         
-        print(f"Sent message to chat {chat_id} with cid {client_message_id}")
+        self.logger.info(f"Sent message to chat {chat_id} with cid {client_message_id}")
         return self.send_command(self.OPCODE_MAP['SEND_MESSAGE'], payload, wait_for_response=wait_for_response)
 
     def get_history(self, chat_id: int, count: int = 30, from_timestamp: int = None):
@@ -331,7 +350,7 @@ class MaxAPI:
         payload = {"chatId": chat_id, "subscribe": subscribe}
         status = "Subscribed to" if subscribe else "Unsubscribed from"
         response = self.send_command(self.OPCODE_MAP['SUBSCRIBE_TO_CHAT'], payload)
-        print(f"{status} chat {chat_id}")
+        self.logger.info(f"{status} chat {chat_id}")
         return response
 
     def mark_as_read(self, chat_id: int, message_id: str):
@@ -341,6 +360,71 @@ class MaxAPI:
     def get_contact_details(self, contact_ids: list):
         payload = {"contactIds": contact_ids}
         return self.send_command(self.OPCODE_MAP['GET_CONTACT_DETAILS'], payload)
+    
+    def get_contact_by_phone(self, phone_number: str):
+        payload = {"phone": phone_number}
+        return self.send_command(self.OPCODE_MAP['FIND_BY_PHONE_NUMBER'], payload)
+    
+    def get_chat_by_id(self, chat_id: str):
+        return self.chats.get(chat_id)
+    
+    def get_all_chats(self):
+        return self.chats
+    
+    def send_vertify_code(self, phone_number: str):
+        """Sends a verification code to a phone number to start the authentication process."""
+        payload = {
+            "phone": phone_number,
+            "type": "START_AUTH",
+            "language": "ru"
+	    }
+        res = self.send_command(self.OPCODE_MAP['SEND_VERTIFY_CODE'], payload)
+        # Temporarily store the token received for the code verification step
+        if 'payload' in res and 'token' in res['payload']:
+            self.token = res['payload']['token']
+            self.logger.info('Saved temp auth-token')
+        return res
+    
+    def check_vertify_code(self, code: str):
+        """Checks the verification code and completes authentication."""
+        if not self.token:
+            raise RuntimeError("Cannot check verification code. Please call send_vertify_code first.")
+        
+        payload = {
+            "token": self.token,
+            "verifyCode": code,
+            "authTokenType": "CHECK_CODE"
+        }
+        res = self.send_command(self.OPCODE_MAP['CHECK_VERTIFY_CODE'], payload, wait_for_response=True)
+        
+        # On success, a new, permanent token is issued.
+        token = res['payload'].get('tokenAttrs', {}).get('LOGIN', {}).get('token')
+        if token:
+            self.token = token
+            # Now that we have the permanent token, trigger the full authentication
+            self.logger.info("Verification successful. Finalizing authentication...")
+
+            # Instead of run_sync, use proper async coordination
+            auth_event = threading.Event()
+            auth_result = [None]  # [exception or None]
+
+            def _run_authenticate():
+                try:
+                    future = self._authenticate_async()
+                    self.ioloop.add_future(future, lambda f: auth_event.set())
+                except Exception as e:
+                    auth_result[0] = e
+                    auth_event.set()
+
+            self.ioloop.add_callback(_run_authenticate)
+            auth_event.wait()
+            if auth_result[0] is not None:
+                raise auth_result[0]
+            
+            self.logger.info("API is online and ready.")
+            return self.token
+            
+        return res
     
     def send_generic_command(self, command_name: str, payload: dict, wait_for_response: bool = True, timeout: int = 10):
         command_name_upper = command_name.upper()
