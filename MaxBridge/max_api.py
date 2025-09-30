@@ -107,7 +107,7 @@ class MaxAPI:
         """Main async task: connects, launches listener, authenticates (if token exists), and signals readiness."""
         while True:
             try:
-                print("Connecting...")
+                self.logger.info('Connecting...')
                 # Create a custom HTTPRequest with Origin header
                 request = HTTPRequest(
                     url=self.ws_url,
