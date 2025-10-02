@@ -132,7 +132,7 @@ class MaxAPI:
                 else:
                     self.logger.info("API is connected. Please authenticate using verification code methods.")
 
-                self.heartbeat_callback = tornado.ioloop.PeriodicCallback(self._send_heartbeat, 5000)
+                self.heartbeat_callback = tornado.ioloop.PeriodicCallback(self._send_heartbeat, 3000)
                 self.heartbeat_callback.start()
                 
                 # Signal that the connection is ready for commands
