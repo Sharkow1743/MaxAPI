@@ -54,6 +54,7 @@ class MaxAPI:
         }
         self.user = None
         self.chats = {}
+        self.subscribed_chats = set()
 
         self.ws = None
         self.ioloop = None
@@ -144,21 +145,87 @@ class MaxAPI:
         
     @tornado.gen.coroutine
     def _listener_loop_async(self):
-        """Asynchronously listens for all incoming messages."""
+        """Asynchronously listens for all incoming messages. Auto-reconnects on server close."""
         try:
             while self.is_running:
                 message = yield self.ws.read_message()
                 if message is None:
                     if self.is_running:
-                        self.logger.warning("Connection closed by server.")
+                        self.logger.warning("Connection closed by server. Attempting to reconnect...")
+                        # Trigger reconnect in async context
+                        yield self._reconnect_async()
                     break
                 self._process_message(message)
         except tornado.websocket.WebSocketClosedError:
-             if self.is_running: self.logger.warning("Listener loop terminated: WebSocket closed.")
+            if self.is_running:
+                self.logger.warning("Listener loop terminated: WebSocket closed by server. Reconnecting...")
+                yield self._reconnect_async()
         except Exception as e:
-            if self.is_running: self.logger.error(f"An error occurred in the listener loop: {e}")
+            if self.is_running:
+                self.logger.error(f"An error occurred in the listener loop: {e}")
+                yield self._reconnect_async()
         finally:
             self.is_running = False
+
+    @tornado.gen.coroutine
+    def _reconnect_async(self):
+        """Async reconnect logic triggered internally after connection loss."""
+        self.is_running = False
+        if self.heartbeat_callback:
+            self.heartbeat_callback.stop()
+
+        # Close existing WS if still open
+        if self.ws:
+            try:
+                self.ws.close()
+            except:
+                pass
+
+        # Wait a moment before reconnecting
+        yield tornado.gen.sleep(2)
+
+        # Re-initialize connection
+        try:
+            self.logger.info('Reconnecting...')
+            request = HTTPRequest(
+                url=self.ws_url,
+                headers={
+                    "Origin": "https://web.max.ru",
+                    "User-Agent": self.user_agent["headerUserAgent"],
+                    "Sec-Fetch-Dest": "empty",
+                    "Sec-Fetch-Mode": "websocket",
+                    "Sec-Fetch-Site": "cross-site",
+                }
+            )
+            self.ws = yield tornado.websocket.websocket_connect(request)
+            self.is_running = True
+            self.logger.info("Reconnected to WebSocket.")
+            yield self._handshake_async()
+
+            # Re-authenticate if token exists
+            if self.token:
+                yield self._authenticate_async()
+                self.logger.info("Re-authenticated successfully.")
+
+            # Restart heartbeat
+            if self.heartbeat_callback:
+                self.heartbeat_callback.start()
+
+            for chat_id in self.subscribed_chats:
+                try:
+                    yield self.send_command_async(self.OPCODE_MAP['SUBSCRIBE_TO_CHAT'], {"chatId": chat_id, "subscribe": True})
+                    self.logger.debug(f"Resubscribed to chat {chat_id}")
+                except Exception as e:
+                    self.logger.warning(f"Failed to resubscribe to chat {chat_id}: {e}")
+
+            self.logger.info("Reconnection and re-authentication complete.")
+        except Exception as e:
+            self.logger.error(f"Reconnection failed: {e}. Will retry in 5 seconds...")
+            yield tornado.gen.sleep(5)
+            # Try again recursively (limited by caller's logic or external control)
+            # Or you can raise and let parent handle
+            if self.is_running:
+                yield self._reconnect_async()  # Recursive retry
     
     def _process_message(self, message):
         """Processes a raw message, dispatching to sync/async waiters or event handlers."""
@@ -188,7 +255,7 @@ class MaxAPI:
     def close(self):
         if not self.is_running and self.ioloop is None: return
         self.logger.info("Closing connection...")
-        self.is_running = False
+        self.is_running = False  # Prevent reconnect attempts
 
         if self.ioloop:
             self.ioloop.add_callback(self._shutdown_async)
@@ -351,6 +418,10 @@ class MaxAPI:
         status = "Subscribed to" if subscribe else "Unsubscribed from"
         response = self.send_command(self.OPCODE_MAP['SUBSCRIBE_TO_CHAT'], payload)
         self.logger.info(f"{status} chat {chat_id}")
+        if subscribe:
+            self.subscribed_chats.add(chat_id)
+        else:
+            self.subscribed_chats.discard(chat_id)
         return response
 
     def mark_as_read(self, chat_id: int, message_id: str):
