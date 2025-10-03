@@ -232,8 +232,6 @@ class MaxAPI:
         """Processes a raw message, dispatching to sync/async waiters or event handlers."""
         try:
             data = json.loads(message)
-
-            self.logger.debug(f"Received API response: {json.dumps(data, indent=4, ensure_ascii=False)}")
             
             if data.get("cmd") == 1:
                 seq_id = data.get("seq")
@@ -248,10 +246,13 @@ class MaxAPI:
                         with self.response_lock:
                             self.pending_responses.pop(seq_id, None)
                         pending_request["future"].set_result(data)
-            else:
+            elif data.get("cmd") == 0:
                 # This is a server-push event, not a response to a command.
                 if self.on_event:
                     self.ioloop.run_in_executor(None, self.on_event, data)
+            else:
+                self.logger.debug(f"Received API error(?): {json.dumps(data, indent=4, ensure_ascii=False)}")
+        
         except Exception as e:
             self.logger.error(f"Error processing message: {e}")
 

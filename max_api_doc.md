@@ -76,13 +76,13 @@ Authenticate user; should be sent as second message.
       "baseUrl": "https://i.oneme.ru/i?r=BUGhUou04b028GIQiF8sPj1EMoEg2OSnHLBfb-SHaZ9Ay-Ag1jAVh2Bw-LDi7511o7RRkJxj_ZGNkDUfe8dvEb24",
       "names": [
         {
-          "name": "TransferBot",
-          "firstName": "TransferBot",
-          "lastName": "",
+          "name": "Name",
+          "firstName": "FirstName",
+          "lastName": "LastName",
           "type": "ONEME"
         }
       ],
-      "phone": 79965433117,
+      "phone": 123123123123,
       "options": ["TT", "ONEME"],
       "photoId": 11549759,
       "updateTime": 1754132721403,
