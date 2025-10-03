@@ -200,6 +200,7 @@ class MaxAPI:
             self.ws = yield tornado.websocket.websocket_connect(request)
             self.is_running = True
             self.logger.info("Reconnected to WebSocket.")
+            self.ioloop.add_callback(self._listener_loop_async)
             yield self._handshake_async()
 
             # Re-authenticate if token exists
@@ -231,6 +232,8 @@ class MaxAPI:
         """Processes a raw message, dispatching to sync/async waiters or event handlers."""
         try:
             data = json.loads(message)
+
+            self.logger.debug(f"Received API response: {json.dumps(data, indent=4, ensure_ascii=False)}")
             
             if data.get("cmd") == 1:
                 seq_id = data.get("seq")
