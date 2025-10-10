@@ -159,6 +159,10 @@ class MaxAPI:
                     pending_request = self.pending_responses.get(seq_id)
                 
                 if pending_request:
+                    original_opcode = pending_request.get("opcode")
+                    if original_opcode != self.OPCODE_MAP['HEARTBEAT']:
+                        self.logger.debug(f"API Response (for Opcode {original_opcode}, Seq {seq_id}): {json.dumps(data, ensure_ascii=False)}")
+
                     if "event" in pending_request:
                         pending_request["response"] = data
                         pending_request["event"].set()
@@ -207,7 +211,7 @@ class MaxAPI:
         
         future = tornado.gen.Future()
         with self.response_lock:
-            self.pending_responses[seq_id] = {"future": future}
+            self.pending_responses[seq_id] = {"future": future, "opcode": opcode}
 
         try:
             yield self.ws.write_message(json.dumps(command))
@@ -243,7 +247,7 @@ class MaxAPI:
         response = yield self.send_command_async(self.OPCODE_MAP['AUTHENTICATE'], payload)
         response = response['payload']
         self.logger.info(f"Authentication successful. User: {response['profile']['contact']['names'][0]['name']}")
-        self.user = response['profile']
+        self.user = response['profile']['contact']
         chats = {}
         for item in response['chats']:
             item_id = str(item.get('id'))
@@ -283,7 +287,7 @@ class MaxAPI:
                     return None
                 event = threading.Event()
                 with self.response_lock:
-                    self.pending_responses[seq_id] = {"event": event, "response": None}
+                    self.pending_responses[seq_id] = {"event": event, "response": None, "opcode": opcode}
                 self.ioloop.add_callback(self.ws.write_message, json.dumps(command))
                 is_set = event.wait(timeout)
                 with self.response_lock:
