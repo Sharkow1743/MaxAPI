@@ -69,8 +69,11 @@ class MaxAPI:
 
         self.on_event = on_event if callable(on_event) else self._default_on_event
 
-        signal.signal(signal.SIGINT, self._signal_handler)
-        signal.signal(signal.SIGTERM, self._signal_handler)
+        try:
+            signal.signal(signal.SIGINT, self._signal_handler)
+            signal.signal(signal.SIGTERM, self._signal_handler)
+        except ValueError:
+            pass
 
         self.logger = logging.getLogger("MaxAPI")
 
@@ -604,8 +607,7 @@ class MaxAPI:
             
             self.logger.info("API is online and ready.")
             return self.token
-            
-        return res
+        self.logger.error(res)
     
     def send_generic_command(self, command_name: str, payload: dict, wait_for_response: bool = True, timeout: int = 10):
         """
