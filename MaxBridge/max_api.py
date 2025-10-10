@@ -14,15 +14,14 @@ from tornado.httpclient import HTTPRequest
 
 class MaxAPI:
     """
-    A Python wrapper for the Max Messenger WebSocket API, powered by Tornado.
-    The public interface remains synchronous and blocking for user convenience.
+    Python api wrapper for max messenger
     """
 
     OPCODE_MAP = {
         'HEARTBEAT': 1,
         'HANDSHAKE': 6,
-        'SEND_VERTIFY_CODE': 17,
-        'CHECK_VERTIFY_CODE': 18,
+        'SEND_VERIFY_CODE': 17,
+        'CHECK_VERIFY_CODE': 18,
         'AUTHENTICATE': 19,
         'GET_CONTACT_DETAILS': 32,
         'FIND_BY_PHONE_NUMBER': 46,
@@ -40,7 +39,7 @@ class MaxAPI:
             auth_token (str, optional): The authentication token for the session. If provided,
                                         the API will connect and authenticate automatically.
                                         If not provided, the API will connect and wait for
-                                        manual authentication via send_vertify_code and check_vertify_code.
+                                        manual authentication via send_verify_code and check_verify_code.
             on_event (callable, optional): A callback function to handle server-push events.
                                            It receives one argument: the event data dictionary.
         """
@@ -77,17 +76,23 @@ class MaxAPI:
 
         self._start_ioloop()
         
-        # We wait for the connection to be established, but not necessarily authenticated.
         is_ready = self.ready_event.wait(timeout=20)
         if not is_ready:
             self.close()
             raise TimeoutError("Failed to connect to WebSocket within the timeout period.")
 
     def _signal_handler(self, signum, frame):
+        """Handles termination signals for graceful shutdown."""
         self.logger.info(f"\nSignal {signum} received, initiating shutdown...")
         self.close()
 
     def _default_on_event(self, event_data):
+        """
+        Default event handler that logs incoming server events.
+        
+        Args:
+            event_data (dict): The event data received from the server.
+        """
         opcode = event_data.get("opcode")
         if opcode == 128:
             self.logger.info(f"\n[New Message Received] Event: {json.dumps(event_data, indent=2, ensure_ascii=False)}\n")
@@ -97,6 +102,7 @@ class MaxAPI:
             self.logger.info(f"\n[Unknown Event Received] Event: {json.dumps(event_data, indent=2, ensure_ascii=False)}\n")
 
     def _start_ioloop(self):
+        """Starts the Tornado I/O loop in a separate thread."""
         if self.ioloop_thread is not None: return
         self.ioloop = tornado.ioloop.IOLoop()
         self.ioloop_thread = threading.Thread(target=self.ioloop.start, daemon=True)
@@ -105,11 +111,10 @@ class MaxAPI:
 
     @tornado.gen.coroutine
     def _connect_and_run(self):
-        """Main async task: connects, launches listener, authenticates (if token exists), and signals readiness."""
+        """Establishes the initial WebSocket connection and runs the main loop."""
         while True:
             try:
                 self.logger.info('Connecting...')
-                # Create a custom HTTPRequest with Origin header
                 request = HTTPRequest(
                     url=self.ws_url,
                     headers={
@@ -126,7 +131,6 @@ class MaxAPI:
                 self.ioloop.add_callback(self._listener_loop_async)
                 yield self._handshake_async()
                 
-                # Only authenticate if a token was provided during initialization
                 if self.token:
                     yield self._authenticate_async()
                     self.logger.info("API is online and ready.")
@@ -136,7 +140,6 @@ class MaxAPI:
                 self.heartbeat_callback = tornado.ioloop.PeriodicCallback(self._send_heartbeat, 3000)
                 self.heartbeat_callback.start()
                 
-                # Signal that the connection is ready for commands
                 self.ready_event.set()
                 break
             except Exception as e:
@@ -145,14 +148,13 @@ class MaxAPI:
         
     @tornado.gen.coroutine
     def _listener_loop_async(self):
-        """Asynchronously listens for all incoming messages. Auto-reconnects on server close."""
+        """Asynchronously listens for messages from the WebSocket."""
         try:
             while self.is_running:
                 message = yield self.ws.read_message()
                 if message is None:
                     if self.is_running:
                         self.logger.warning("Connection closed by server. Attempting to reconnect...")
-                        # Trigger reconnect in async context
                         yield self._reconnect_async()
                     break
                 self._process_message(message)
@@ -169,22 +171,16 @@ class MaxAPI:
 
     @tornado.gen.coroutine
     def _reconnect_async(self):
-        """Async reconnect logic triggered internally after connection loss."""
+        """Handles the reconnection logic when the connection is lost."""
         self.is_running = False
-        if self.heartbeat_callback:
-            self.heartbeat_callback.stop()
+        if self.heartbeat_callback: self.heartbeat_callback.stop()
 
-        # Close existing WS if still open
         if self.ws:
-            try:
-                self.ws.close()
-            except:
-                pass
+            try: self.ws.close()
+            except: pass
 
-        # Wait a moment before reconnecting
         yield tornado.gen.sleep(2)
 
-        # Re-initialize connection
         try:
             self.logger.info('Reconnecting...')
             request = HTTPRequest(
@@ -203,18 +199,15 @@ class MaxAPI:
             self.ioloop.add_callback(self._listener_loop_async)
             yield self._handshake_async()
 
-            # Re-authenticate if token exists
             if self.token:
                 yield self._authenticate_async()
                 self.logger.info("Re-authenticated successfully.")
 
-            # Restart heartbeat
-            if self.heartbeat_callback:
-                self.heartbeat_callback.start()
+            if self.heartbeat_callback: self.heartbeat_callback.start()
 
             for chat_id in self.subscribed_chats:
                 try:
-                    yield self.send_command_async(self.OPCODE_MAP['SUBSCRIBE_TO_CHAT'], {"chatId": chat_id, "subscribe": True})
+                    yield self.send_command_async(self.OPCODE_MAP['SUBSCRIBE_TO_CHAT'], {"chatId": int(chat_id), "subscribe": True})
                     self.logger.debug(f"Resubscribed to chat {chat_id}")
                 except Exception as e:
                     self.logger.warning(f"Failed to resubscribe to chat {chat_id}: {e}")
@@ -223,47 +216,55 @@ class MaxAPI:
         except Exception as e:
             self.logger.error(f"Reconnection failed: {e}. Will retry in 5 seconds...")
             yield tornado.gen.sleep(5)
-            # Try again recursively (limited by caller's logic or external control)
-            # Or you can raise and let parent handle
             if self.is_running:
-                yield self._reconnect_async()  # Recursive retry
+                yield self._reconnect_async()
     
     def _process_message(self, message):
-        """Processes a raw message, dispatching to sync/async waiters or event handlers."""
+        """
+        Processes incoming WebSocket messages.
+        
+        Args:
+            message (str): The raw message string from the WebSocket.
+        """
         try:
             data = json.loads(message)
             
-            if data.get("cmd") == 1:
-                seq_id = data.get("seq")
-                with self.response_lock:
-                    pending_request = self.pending_responses.get(seq_id)
-                
-                if pending_request:
-                    original_opcode = pending_request.get("opcode")
-                    if original_opcode != self.OPCODE_MAP['HEARTBEAT']:
-                        self.logger.debug(f"API Response (for Opcode {original_opcode}, Seq {seq_id}): {json.dumps(data, ensure_ascii=False)}")
+            match data.get("cmd"):
+                case 1:
+                    seq_id = data.get("seq")
+                    with self.response_lock:
+                        pending_request = self.pending_responses.get(seq_id)
+                    
+                    if pending_request:
+                        original_opcode = pending_request.get("opcode")
+                        if original_opcode != self.OPCODE_MAP['HEARTBEAT']:
+                            self.logger.debug(f"API Response (for Opcode {original_opcode}, Seq {seq_id}): {json.dumps(data, ensure_ascii=False)}")
 
-                    if "event" in pending_request:
-                        pending_request["response"] = data
-                        pending_request["event"].set()
-                    elif "future" in pending_request:
-                        with self.response_lock:
-                            self.pending_responses.pop(seq_id, None)
-                        pending_request["future"].set_result(data)
-            elif data.get("cmd") == 0:
-                # This is a server-push event, not a response to a command.
-                if self.on_event:
-                    self.ioloop.run_in_executor(None, self.on_event, data)
-            else:
-                self.logger.debug(f"Received API error(?): {json.dumps(data, indent=4, ensure_ascii=False)}")
+                        if "event" in pending_request:
+                            pending_request["response"] = data
+                            pending_request["event"].set()
+                        elif "future" in pending_request:
+                            with self.response_lock:
+                                self.pending_responses.pop(seq_id, None)
+                            pending_request["future"].set_result(data)
+                case 0:
+                    if self.on_event:
+                        self.ioloop.run_in_executor(None, self.on_event, data)
+                case 3:
+                    self.logger.error(f"Received API error: {json.dumps(data, indent=4, ensure_ascii=False)}")
+                case _:
+                    self.logger.debug(f"Received unexpected API response: {json.dumps(data, indent=4, ensure_ascii=False)}")
         
         except Exception as e:
             self.logger.error(f"Error processing message: {e}")
 
     def close(self):
+        """
+        Closes the WebSocket connection and stops the I/O loop.
+        """
         if not self.is_running and self.ioloop is None: return
         self.logger.info("Closing connection...")
-        self.is_running = False  # Prevent reconnect attempts
+        self.is_running = False
 
         if self.ioloop:
             self.ioloop.add_callback(self._shutdown_async)
@@ -277,16 +278,24 @@ class MaxAPI:
 
     @tornado.gen.coroutine
     def _shutdown_async(self):
+        """Asynchronously shuts down the WebSocket and I/O loop."""
         if self.heartbeat_callback: self.heartbeat_callback.stop()
         if self.ws: self.ws.close()
-        # Give a moment for tasks to finish before stopping the loop
         self.ioloop.call_later(0.1, self.ioloop.stop)
     
-    # --- ASYNC INTERNAL COMMANDS ---
-
     @tornado.gen.coroutine
     def send_command_async(self, opcode: int, payload: dict, timeout: int = 10):
-        """Async-native command sender for internal use. Uses Tornado Futures."""
+        """
+        Sends a command to the WebSocket API asynchronously.
+
+        Args:
+            opcode (int): The operation code for the command.
+            payload (dict): The payload for the command.
+            timeout (int, optional): The timeout in seconds. Defaults to 10.
+
+        Returns:
+            dict: The response from the server.
+        """
         if not self.is_running: raise ConnectionError("Not connected.")
         
         seq_id = next(self.seq_counter)
@@ -310,6 +319,7 @@ class MaxAPI:
 
     @tornado.gen.coroutine
     def _handshake_async(self):
+        """Performs the initial handshake with the WebSocket server."""
         self.logger.info("Performing handshake...")
         payload = {"userAgent": self.user_agent, "deviceId":"asd"}
         yield self.send_command_async(self.OPCODE_MAP['HANDSHAKE'], payload)
@@ -317,6 +327,7 @@ class MaxAPI:
 
     @tornado.gen.coroutine
     def _authenticate_async(self):
+        """Authenticates the session using the provided token."""
         self.logger.info("Authenticating...")
         if not self.token:
             self.logger.error("Authentication failed: No token available.")
@@ -328,11 +339,13 @@ class MaxAPI:
             "draftsSync": 0, "chatsCount": 50
         }
         response = yield self.send_command_async(self.OPCODE_MAP['AUTHENTICATE'], payload)
-        response = response['payload']
-        self.logger.info(f"Authentication successful. User: {response['profile']['contact']['names'][0]['name']}")
-        self.user = response['profile']['contact']
+        response_payload = response['payload']
+        self.logger.info(f"Authentication successful. User: {response_payload['profile']['contact']['names'][0]['name']}")
+        self.user = response_payload['profile']['contact']
+        
+        # Convert incoming integer chat IDs to strings for internal storage
         chats = {}
-        for item in response['chats']:
+        for item in response_payload['chats']:
             item_id = str(item.get('id'))
             new_item = item.copy()
             del new_item['id']
@@ -341,9 +354,15 @@ class MaxAPI:
 
     @tornado.gen.coroutine
     def _send_heartbeat(self):
+        """Sends a heartbeat to keep the connection alive."""
         if not self.is_running: return
         try:
-            self.send_command(self.OPCODE_MAP['HEARTBEAT'], {"interactive": False}, wait_for_response=False)
+            # Heartbeat doesn't need a response, so we call it directly
+            self.ioloop.add_callback(self.ws.write_message, json.dumps({
+                "ver": 11, "cmd": 0, "seq": next(self.seq_counter),
+                "opcode": self.OPCODE_MAP['HEARTBEAT'],
+                "payload": {"interactive": False}
+            }))
         except tornado.websocket.WebSocketClosedError:
             self.logger.warning("Heartbeat failed: WebSocket is closed.")
             self.is_running = False
@@ -353,54 +372,65 @@ class MaxAPI:
                 self.is_running = False
 
     def send_command(self, opcode: int, payload: dict, wait_for_response: bool = True, timeout: int = 10):
-        """Synchronous bridge to the async world for external callers with retries."""
-        max_attempts = 3
-        attempt = 0
-        while attempt < max_attempts:
-            attempt += 1
-            if not self.is_running:
-                self._reconnect()
-                if not self.is_running:
-                    raise ConnectionError("Unable to reconnect to WebSocket.")
-            try:
-                seq_id = next(self.seq_counter)
-                command = {"ver": 11, "cmd": 0, "seq": seq_id, "opcode": opcode, "payload": payload}
-                if not wait_for_response:
-                    self.ioloop.add_callback(self.ws.write_message, json.dumps(command))
-                    return None
-                event = threading.Event()
-                with self.response_lock:
-                    self.pending_responses[seq_id] = {"event": event, "response": None, "opcode": opcode}
-                self.ioloop.add_callback(self.ws.write_message, json.dumps(command))
-                is_set = event.wait(timeout)
-                with self.response_lock:
-                    pending_request = self.pending_responses.pop(seq_id, None)
-                if not is_set:
-                    raise TimeoutError(f"Request (opcode: {opcode}, seq: {seq_id}) timed out after {timeout} seconds.")
-                if not pending_request:
-                    raise RuntimeError(f"Response for request (seq: {seq_id}) was lost.")
-                return pending_request.get("response")
-            except (ConnectionError, tornado.websocket.WebSocketClosedError):
-                self._reconnect()
-            except Exception:
-                if attempt == max_attempts:
-                    raise
-                time.sleep(1)
+        """
+        Sends a command to the WebSocket API and waits for a response.
 
-    def _reconnect(self):
-        self.logger.info("Attempting to reconnect to WebSocket...")
-        self.close()
-        self._start_ioloop()
-        if not self.ready_event.wait(timeout=10):
-            self.is_running = False
-            raise ConnectionError("Failed to reconnect after multiple attempts.")
+        Args:
+            opcode (int): The operation code for the command.
+            payload (dict): The payload for the command.
+            wait_for_response (bool, optional): If True, waits for a response. Defaults to True.
+            timeout (int, optional): The timeout in seconds. Defaults to 10.
 
-    # --- Public API Methods (Interface remains unchanged) ---
-    def send_message(self, chat_id: int, text: str, reply_id: int | None = None, wait_for_response: bool = False, format: bool = False):
+        Returns:
+            dict or None: The response from the server, or None if wait_for_response is False.
+        """
+        if not self.is_running:
+            raise ConnectionError("Not connected. Cannot send command.")
+        
+        seq_id = next(self.seq_counter)
+        command = {"ver": 11, "cmd": 0, "seq": seq_id, "opcode": opcode, "payload": payload}
+        
+        if not wait_for_response:
+            self.ioloop.add_callback(self.ws.write_message, json.dumps(command))
+            return None
+            
+        event = threading.Event()
+        with self.response_lock:
+            self.pending_responses[seq_id] = {"event": event, "response": None, "opcode": opcode}
+            
+        self.ioloop.add_callback(self.ws.write_message, json.dumps(command))
+        
+        is_set = event.wait(timeout)
+        
+        with self.response_lock:
+            pending_request = self.pending_responses.pop(seq_id, None)
+            
+        if not is_set:
+            raise TimeoutError(f"Request (opcode: {opcode}, seq: {seq_id}) timed out after {timeout} seconds.")
+        if not pending_request:
+            raise RuntimeError(f"Response for request (seq: {seq_id}) was lost.")
+            
+        return pending_request.get("response")
+
+    # --- Public API Methods ---
+    def send_message(self, chat_id: str, text: str, reply_id: str = None, wait_for_response: bool = False, format: bool = False):
+        """
+        Sends a message to a specific chat.
+
+        Args:
+            chat_id (str): The ID of the chat.
+            text (str): The message content.
+            reply_id (str, optional): The ID of the message to reply to. Defaults to None.
+            wait_for_response (bool, optional): If True, waits for a server response. Defaults to False.
+            format (bool, optional): If True, parses Markdown formatting. Defaults to False.
+
+        Returns:
+            dict or None: The server response if wait_for_response is True, otherwise None.
+        """
         client_message_id = int(time.time() * 1000)
 
         payload = {
-            "chatId": chat_id,
+            "chatId": int(chat_id),
             "message": {"text": text, "cid": client_message_id, "elements": [], "attaches": []},
             "notify": True
         }
@@ -408,7 +438,7 @@ class MaxAPI:
         if reply_id:
             payload["message"]["link"] = {
                 "type": "REPLY",
-                "messageId": reply_id
+                "messageId": int(reply_id)
             }
         if format:
             payload["message"]["elements"], payload["message"]["text"] = parse_markdown(text)
@@ -416,13 +446,34 @@ class MaxAPI:
         self.logger.info(f"Sent message to chat {chat_id} with cid {client_message_id}")
         return self.send_command(self.OPCODE_MAP['SEND_MESSAGE'], payload, wait_for_response=wait_for_response)
 
-    def get_history(self, chat_id: int, count: int = 30, from_timestamp: int = None):
+    def get_history(self, chat_id: str, count: int = 30, from_timestamp: int = None):
+        """
+        Retrieves the message history for a chat.
+
+        Args:
+            chat_id (str): The ID of the chat.
+            count (int, optional): The number of messages to retrieve. Defaults to 30.
+            from_timestamp (int, optional): The timestamp to start fetching from. Defaults to the current time.
+
+        Returns:
+            dict: The server response containing the message history.
+        """
         if from_timestamp is None: from_timestamp = int(time.time() * 1000)
-        payload = {"chatId": chat_id, "from": from_timestamp, "forward": 0, "backward": count, "getMessages": True}
+        payload = {"chatId": int(chat_id), "from": from_timestamp, "forward": 0, "backward": count, "getMessages": True}
         return self.send_command(self.OPCODE_MAP['GET_HISTORY'], payload)
 
-    def subscribe_to_chat(self, chat_id: int, subscribe: bool = True):
-        payload = {"chatId": chat_id, "subscribe": subscribe}
+    def subscribe_to_chat(self, chat_id: str, subscribe: bool = True):
+        """
+        Subscribes to or unsubscribes from a chat to receive real-time updates.
+
+        Args:
+            chat_id (str): The ID of the chat.
+            subscribe (bool, optional): If True, subscribes to the chat. If False, unsubscribes. Defaults to True.
+
+        Returns:
+            dict: The server response.
+        """
+        payload = {"chatId": int(chat_id), "subscribe": subscribe}
         status = "Subscribed to" if subscribe else "Unsubscribed from"
         response = self.send_command(self.OPCODE_MAP['SUBSCRIBE_TO_CHAT'], payload)
         self.logger.info(f"{status} chat {chat_id}")
@@ -432,60 +483,111 @@ class MaxAPI:
             self.subscribed_chats.discard(chat_id)
         return response
 
-    def mark_as_read(self, chat_id: int, message_id: str):
-        payload = {"type": "READ_MESSAGE", "chatId": chat_id, "messageId": message_id, "mark": int(time.time() * 1000)}
+    def mark_as_read(self, chat_id: str, message_id: str):
+        """
+        Marks a message in a chat as read.
+
+        Args:
+            chat_id (str): The ID of the chat.
+            message_id (str): The ID of the message to mark as read.
+
+        Returns:
+            dict: The server response.
+        """
+        payload = {"type": "READ_MESSAGE", "chatId": int(chat_id), "messageId": message_id, "mark": int(time.time() * 1000)}
         return self.send_command(self.OPCODE_MAP['MARK_AS_READ'], payload)
     
-    def get_contact_details(self, contact_ids: list):
-        payload = {"contactIds": contact_ids}
+    def get_contact_details(self, contact_ids: list[str]):
+        """
+        Retrieves details for a list of contacts.
+
+        Args:
+            contact_ids (list[str]): A list of contact IDs.
+
+        Returns:
+            dict: The server response containing contact details.
+        """
+        payload = {"contactIds": [int(cid) for cid in contact_ids]}
         return self.send_command(self.OPCODE_MAP['GET_CONTACT_DETAILS'], payload)
     
     def get_contact_by_phone(self, phone_number: str):
+        """
+        Finds a contact by their phone number.
+
+        Args:
+            phone_number (str): The phone number to search for.
+
+        Returns:
+            dict: The server response containing the contact's information.
+        """
         payload = {"phone": phone_number}
         return self.send_command(self.OPCODE_MAP['FIND_BY_PHONE_NUMBER'], payload)
     
     def get_chat_by_id(self, chat_id: str):
+        """
+        Retrieves a chat from the local cache by its ID.
+
+        Args:
+            chat_id (str): The ID of the chat.
+
+        Returns:
+            dict or None: The chat object if found, otherwise None.
+        """
         return self.chats.get(chat_id)
     
     def get_all_chats(self):
+        """
+        Returns a dictionary of all cached chats.
+
+        Returns:
+            dict: A dictionary of all chats.
+        """
         return self.chats
     
-    def send_vertify_code(self, phone_number: str):
-        """Sends a verification code to a phone number to start the authentication process."""
+    def send_verify_code(self, phone_number: str):
+        """
+        Sends a verification code to a phone number to initiate authentication.
+
+        Args:
+            phone_number (str): The phone number to send the code to.
+
+        Returns:
+            dict: The server response.
+        """
         payload = {
-            "phone": phone_number,
-            "type": "START_AUTH",
-            "language": "ru"
+            "phone": phone_number, "type": "START_AUTH", "language": "ru"
 	    }
-        res = self.send_command(self.OPCODE_MAP['SEND_VERTIFY_CODE'], payload)
-        # Temporarily store the token received for the code verification step
+        res = self.send_command(self.OPCODE_MAP['SEND_VERIFY_CODE'], payload)
         if 'payload' in res and 'token' in res['payload']:
             self.token = res['payload']['token']
             self.logger.info('Saved temp auth-token')
         return res
     
-    def check_vertify_code(self, code: str):
-        """Checks the verification code and completes authentication."""
+    def check_verify_code(self, code: str):
+        """
+        Verifies the code received via SMS to complete authentication.
+
+        Args:
+            code (str): The verification code.
+
+        Returns:
+            str or dict: The final authentication token if successful, otherwise the server response.
+        """
         if not self.token:
-            raise RuntimeError("Cannot check verification code. Please call send_vertify_code first.")
+            raise RuntimeError("Cannot check verification code. Please call send_verify_code first.")
         
         payload = {
-            "token": self.token,
-            "verifyCode": code,
-            "authTokenType": "CHECK_CODE"
+            "token": self.token, "verifyCode": code, "authTokenType": "CHECK_CODE"
         }
-        res = self.send_command(self.OPCODE_MAP['CHECK_VERTIFY_CODE'], payload, wait_for_response=True)
+        res = self.send_command(self.OPCODE_MAP['CHECK_VERIFY_CODE'], payload, wait_for_response=True)
         
-        # On success, a new, permanent token is issued.
         token = res['payload'].get('tokenAttrs', {}).get('LOGIN', {}).get('token')
         if token:
             self.token = token
-            # Now that we have the permanent token, trigger the full authentication
             self.logger.info("Verification successful. Finalizing authentication...")
 
-            # Instead of run_sync, use proper async coordination
             auth_event = threading.Event()
-            auth_result = [None]  # [exception or None]
+            auth_result = [None]
 
             def _run_authenticate():
                 try:
@@ -506,55 +608,73 @@ class MaxAPI:
         return res
     
     def send_generic_command(self, command_name: str, payload: dict, wait_for_response: bool = True, timeout: int = 10):
+        """
+        Sends a raw command to the API using its string name.
+
+        Args:
+            command_name (str): The name of the command (e.g., 'SEND_MESSAGE').
+            payload (dict): The payload for the command.
+            wait_for_response (bool, optional): If True, waits for a response. Defaults to True.
+            timeout (int, optional): The timeout in seconds. Defaults to 10.
+
+        Returns:
+            dict or None: The server response if wait_for_response is True, otherwise None.
+        """
         command_name_upper = command_name.upper()
         if command_name_upper not in self.OPCODE_MAP:
             raise ValueError(f"Unknown command name '{command_name}'. Valid names are: {list(self.OPCODE_MAP.keys())}")
         opcode = self.OPCODE_MAP[command_name_upper]
         return self.send_command(opcode, payload, wait_for_response, timeout)
     
-    def get_video(self, id):
-        video_info = self.send_command(83, {"videoId": id, "token": self.token})
+    def get_video(self, id: str):
+        """
+        Downloads a video by its ID.
+
+        Args:
+            id (str): The ID of the video.
+
+        Returns:
+            io.BytesIO or None: A byte stream of the video content, or None if not found.
+        """
+        video_info = self.send_command(83, {"videoId": int(id), "token": self.token})
         video_info = video_info['payload']
         url = video_info.get('MP4_1080') or video_info.get('MP4_720')
         if not url: return None
 
-        headers = {
-            'Host': 'vd526.okcdn.ru',
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:141.0) Gecko/20100101 Firefox/141.0',
-            'Accept': 'video/webm,video/ogg,video/*;q=0.9,application/ogg;q=0.7,audio/*;q=0.6,*/*;q=0.5',
-            'Accept-Language': 'ru-RU,ru;q=0.8,en-US;q=0.5,en;q=0.3',
-            'Connection': 'keep-alive',
-            'Sec-Fetch-Dest': 'video',
-            'Sec-Fetch-Mode': 'no-cors',
-            'Sec-Fetch-Site': 'cross-site',
-        }
+        headers = { 'User-Agent': self.user_agent['headerUserAgent'] }
         
-        cookies = { 'tstc': 'p' }
-
-        with requests.get(url, headers=headers, cookies=cookies, stream=True, timeout=30) as r:
+        with requests.get(url, headers=headers, stream=True, timeout=30) as r:
             r.raise_for_status()
-
             content_type = r.headers.get('content-type')
-            if 'video' not in content_type:
-                return None
+            if 'video' not in content_type: return None
             
             video_buffer = io.BytesIO()
-            
             for chunk in r.iter_content(chunk_size=8192):
                 video_buffer.write(chunk)
             
             video_buffer.seek(0)
-
-        return video_buffer
+            return video_buffer
     
-    def get_file(self, id, chat_id, msg_id):
-        file_info = self.send_command(88, {"fileId": id, "chatId": chat_id, "messageId": msg_id})
+    def get_file(self, id: str, chat_id: str, msg_id: str):
+        """
+        Downloads a file by its ID.
+
+        Args:
+            id (str): The ID of the file.
+            chat_id (str): The ID of the chat the file is in.
+            msg_id (str): The ID of the message the file is in.
+
+        Returns:
+            tuple or None: A tuple containing the file content (bytes) and file name, or None if not found.
+        """
+        file_info = self.send_command(88, {"fileId": int(id), "chatId": int(chat_id), "messageId": str(msg_id)})
         file_info = file_info['payload']
         url = file_info.get('url')
         if not url: return None
 
         with requests.get(url, timeout=30) as r:
-            file = r.content
-            file_name = r.headers['X-File-Name']
+            r.raise_for_status()
+            file_content = r.content
+            file_name = r.headers.get('X-File-Name') or "downloaded_file"
 
-        return file, file_name
+        return file_content, file_name

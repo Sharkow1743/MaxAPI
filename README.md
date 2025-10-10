@@ -1,121 +1,164 @@
-# Max API Interface
+# Max Messenger API Python Wrapper
 
-The Max API Interface allows you to interact with the Max Messenger WebSocket API for sending messages, retrieving histories, and subscribing to real-time events.
+## Features
 
-## Getting Started
+-   **Dual Authentication:** Supports both token-based authentication for existing sessions and phone number verification for new sessions.
+-   **Real-Time Event Handling:** Allows for custom callback functions to handle server-push events, such as new messages and presence updates.
+-   **Automatic Reconnection:** Automatically handles connection drops by reconnecting and re-authenticating the session to ensure reliability.
+-   **Helper Methods:** Includes convenience methods for common actions like fetching chat history, downloading files and videos, and managing contacts.
 
-### Prerequisites
+## Installation
 
-- Python 3.x
+You can install library with pip:
 
-### Installing
-
-To install this library, run the following command in your terminal:
 ```bash
-   pip install MaxBridge
+pip install MaxBridge
 ```
 
-### Obtaining the Authentication Token
+## Usage
 
-To interact with the Max API, you'll need to authenticate and obtain a long-lived authentication token (from a legitimate web session). Follow these steps:
+### Initialization
 
-1. Open your web browser and navigate to [Max Messenger Web Version](https://web.max.ru).
-   
-2. Log in to your Max account if you haven't done so already.
+To get started, create an instance of the `MaxAPI` class. You can authenticate using an existing token or by verifying a phone number.
 
-3. After logging in, open the Developer Tools in your web browser (right-click anywhere on the page and select "Inspect" or press `F12`).
+**With an authentication token:**
 
-4. Go to the "Application" tab in Developer Tools.
-
-5. Find and click on "Local storage" in the left sidebar under the "Storage" section. Look for the cookies belonging to the `https://web.max.ru` domain.
-
-6. Find the authentication token. This token is a value of `__oneme_auth`.
-
-7. Copy the value of the authentication token. You'll use this value to authenticate your requests in the MaxAPI class.
-
-## Using the Max API Interface
-
-### Initializing the MaxAPI class
-
-To create an instance of the MaxAPI, pass the authentication token obtained from the previous step:
+If you already have a valid `auth_token`, you can provide it during initialization for a quick and seamless connection.
 
 ```python
-   from MaxBridge import MaxAPI
+from max_api import MaxAPI
 
-   auth_token = 'YOUR_AUTH_TOKEN_HERE'
-   api = MaxAPI(auth_token)
+AUTH_TOKEN = "your_auth_token_here"
+
+api = MaxAPI(auth_token=AUTH_TOKEN)
+```
+#### Obtaining the authentication token
+
+1. Open your web browser and navigate to [Max Messenger Web Version](https://web.max.ru).
+2. Log in to your Max account if you haven't done so already.
+3. After logging in, open the Developer Tools in your web browser (right-click anywhere on the page and select "Inspect" or press `F12`).
+4. Go to the "Application" tab in Developer Tools.
+5. Find and click on "Local storage" in the left sidebar under the "Storage" section. Look for the cookies belonging to the `https://web.max.ru` domain.
+6. Find the authentication token. This token is a value of `__oneme_auth`.
+7. Copy the value of the authentication token. You'll use this value to authenticate your requests in the MaxAPI class.
+
+
+**Without an authentication token (phone number verification):**
+
+If you don't have an `auth_token`, you can authenticate by verifying your phone number.
+
+```python
+from max_api import MaxAPI
+
+api = MaxAPI()
+
+phone_number = "your_phone_number"  # e.g., "+11234567890"
+api.send_verify_code(phone_number)
+
+# Enter the code you receive via SMS
+code = input("Enter verification code: ")
+api.check_verify_code(code)
 ```
 
-### Available Methods
+### Sending a Message
 
-1. **Sending a Message:**
+Once authenticated, you can easily send messages to any chat.
 
-   To send a message, use:
-   ```python
-      api.send_message(chat_id=12345678, text="Hello, World!")
-   ```
+```python
+# The ID of the chat to send the message to
+chat_id = "some_chat_id"
+# The text of the message
+message_text = "Hello, world from the API!"
 
-2. **Retrieving Message History:**
+# Send the message
+api.send_message(chat_id, message_text)
+```
 
-   To retrieve message history, use:
-   ```python
-      response = api.get_history(chat_id=12345678, count=20)
-   ```
+You can also send a reply to a specific message:
 
-3. **Subscribing to a Chat:**
+```python
+api.send_message(chat_id, "This is a reply.", reply_id="message_id_to_reply_to")
+```
 
-   To subscribe to real-time events from a chat, use:
-   ```python
-      api.subscribe_to_chat(chat_id=12345678, subscribe=True)
-   ```
+### Receiving Events
 
-4. **Marking Messages as Read:**
+You can handle real-time events, such as new messages, by passing a callback function to the `on_event` parameter during initialization.
 
-   To mark a specific message as read, use:
-   ```python
-      api.mark_as_read(chat_id=12345678, message_id="12345678")
-   ```
+```python
+import json
 
-5. **Getting video or file**
+def my_event_handler(event_data):
+    """
+    A custom callback to handle incoming events from the server.
+    """
+    opcode = event_data.get("opcode")
+    if opcode == 128:  # New message event
+        print(f"New Message Received: {json.dumps(event_data, indent=2)}")
+    else:
+        print(f"Server Event (Opcode {opcode}): {json.dumps(event_data, indent=2)}")
 
-   To get video, use:
-   ```python
-      api.get_video(id=12345678)
-   ```
-   To get file, use:
-   ```python
-      api.get_file(id=12345678, chat_id=12345678, msg_id="12345678")
-   ```
+# Initialize the API with your custom event handler
+api = MaxAPI(auth_token=AUTH_TOKEN, on_event=my_event_handler)
 
-6. **Finding Contact by Phone Number:**
+# The API will now use my_event_handler for incoming events.
+# Keep the script running to listen for events.
+```
 
-   To find a contact by their phone number, use:
-   ```python
-      api.get_contact_by_phone(phone_number="+12345678901")
-   ```
+### Fetching Chat History
 
-7. **Getting Chats:**
+Retrieve the message history for any chat with a simple method call.
 
-   To retrieve a specific chat by its ID, use:
-   ```python
-      api.get_chat_by_id(chat_id="12345678")
-   ```
+```python
+# The ID of the chat to fetch history from
+chat_id = "some_chat_id"
+# The number of messages to retrieve
+message_count = 50
 
-   To retrieve all available chats, use:
-   ```python
-      api.get_all_chats()
-   ```
+# Get the chat history
+history = api.get_history(chat_id, count=message_count)
+print(history)
+```
 
-8. **Logging in:**
-   
-   To send vertify code, use:
-   ```python
-      api.send_vertify_code(phone_number="+12345678901")
-   ```
+### Subscribing to a Chat
 
-   to log in wth vertify code, use:
-   ```python
-      api.check_vertify_code(code=12345678)
-   ```
+To receive real-time updates for a specific chat (like new messages or typing indicators), you need to subscribe to it.
 
-The chat ID is required for most operations. You can obtain it from the chat URL or through other means specific to your application.
+```python
+# The ID of the chat to subscribe to
+chat_id = "some_chat_id"
+
+# Subscribe to the chat
+api.subscribe_to_chat(chat_id)
+```
+
+### Shutdown
+
+The API handles `SIGINT` (Ctrl+C) and `SIGTERM` signals automatically. You can also call the `close()` method manually to disconnect from the WebSocket server.
+
+```python
+api.close()
+```
+
+## API Reference
+
+### `MaxAPI(auth_token=None, on_event=None)`
+
+-   **`auth_token`** (`str`, optional): An authentication token for the session.
+-   **`on_event`** (`callable`, optional): A callback function for server-push events, which receives one argument: the event data dictionary.
+
+### Methods
+
+-   **`send_message(chat_id, text, reply_id=None, wait_for_response=False, format=False)`**: Sends a message to a chat.
+-   **`get_history(chat_id, count=30, from_timestamp=None)`**: Retrieves the message history for a chat.
+-   **`subscribe_to_chat(chat_id, subscribe=True)`**: Subscribes to or unsubscribes from real-time chat updates.
+-   **`mark_as_read(chat_id, message_id)`**: Marks a specific message as read.
+-   **`get_contact_details(contact_ids)`**: Retrieves profile details for one or more contacts.
+-   **`get_contact_by_phone(phone_number)`**: Finds a contact by their phone number.
+-   **`get_chat_by_id(chat_id)`**: Retrieves a chat from the local cache by its ID.
+-   **`get_all_chats()`**: Returns a dictionary of all cached chats.
+-   **`send_verify_code(phone_number)`**: Sends a verification code to a phone number to begin authentication.
+-   **`check_verify_code(code)`**: Verifies a code received via SMS to complete authentication.
+-   **`send_generic_command(command_name, payload, wait_for_response=True, timeout=10)`**: Sends a raw command to the API by its string name (e.g., `'GET_HISTORY'`).
+-   **`get_video(id)`**: Downloads a video by its ID and returns it as a byte stream.
+-   **`get_file(id, chat_id, msg_id)`**: Downloads a file by its ID and returns its content and name.
+-   **`close()`**: Disconnects from the WebSocket server and shuts down the event loop.
