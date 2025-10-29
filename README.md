@@ -1,164 +1,164 @@
-# Max Messenger API Python Wrapper
+# Max Messenger API — обёртка на Python
 
-## Features
+## Возможности
 
--   **Dual Authentication:** Supports both token-based authentication for existing sessions and phone number verification for new sessions.
--   **Real-Time Event Handling:** Allows for custom callback functions to handle server-push events, such as new messages and presence updates.
--   **Automatic Reconnection:** Automatically handles connection drops by reconnecting and re-authenticating the session to ensure reliability.
--   **Helper Methods:** Includes convenience methods for common actions like fetching chat history, downloading files and videos, and managing contacts.
+- **Двойная аутентификация:** поддержка как токен-ориентированной аутентификации для уже существующих сессий, так и верификации по номеру телефона для новых сессий.
+- **Обработка событий в реальном времени:** позволяет задавать пользовательские функции-обработчики для событий, приходящих от сервера (например, новых сообщений или обновлений статуса собеседника).
+- **Автоматическое восстановление соединения:** автоматически переподключается и повторно аутентифицирует сессию в случае обрыва соединения, обеспечивая надёжность работы.
+- **Вспомогательные методы:** содержит удобные методы для выполнения типичных действий — получение истории чата, загрузка файлов и видео, управление контактами и т.д.
 
-## Installation
+## Установка
 
-You can install library with pip:
+Установите библиотеку с помощью pip:
 
 ```bash
 pip install MaxBridge
 ```
 
-## Usage
+## Использование
 
-### Initialization
+### Инициализация
 
-To get started, create an instance of the `MaxAPI` class. You can authenticate using an existing token or by verifying a phone number.
+Для начала работы создайте экземпляр класса `MaxAPI`. Вы можете аутентифицироваться с помощью уже имеющегося токена или пройти верификацию по номеру телефона.
 
-**With an authentication token:**
+**С использованием токена аутентификации:**
 
-If you already have a valid `auth_token`, you can provide it during initialization for a quick and seamless connection.
+Если у вас уже есть действительный `auth_token`, вы можете передать его при инициализации для быстрого подключения.
 
 ```python
 from max_api import MaxAPI
 
-AUTH_TOKEN = "your_auth_token_here"
+AUTH_TOKEN = "ваш_токен_аутентификации"
 
 api = MaxAPI(auth_token=AUTH_TOKEN)
 ```
-#### Obtaining the authentication token
 
-1. Open your web browser and navigate to [Max Messenger Web Version](https://web.max.ru).
-2. Log in to your Max account if you haven't done so already.
-3. After logging in, open the Developer Tools in your web browser (right-click anywhere on the page and select "Inspect" or press `F12`).
-4. Go to the "Application" tab in Developer Tools.
-5. Find and click on "Local storage" in the left sidebar under the "Storage" section. Look for the cookies belonging to the `https://web.max.ru` domain.
-6. Find the authentication token. This token is a value of `__oneme_auth`.
-7. Copy the value of the authentication token. You'll use this value to authenticate your requests in the MaxAPI class.
+#### Как получить токен аутентификации
 
+1. Откройте веб-браузер и перейдите на [веб-версию Max Messenger](https://web.max.ru).
+2. Войдите в свой аккаунт Max, если вы ещё не авторизованы.
+3. После входа откройте инструменты разработчика в браузере (щёлкните правой кнопкой мыши на странице и выберите «Просмотреть код» или нажмите `F12`).
+4. Перейдите на вкладку «Application» («Приложение») в инструментах разработчика.
+5. В левой панели в разделе «Storage» («Хранилище») найдите и откройте «Local Storage», затем выберите домен `https://web.max.ru`.
+6. Найдите токен аутентификации — это значение ключа `__oneme_auth`.
+7. Скопируйте значение этого токена. Оно понадобится вам для аутентификации в классе `MaxAPI`.
 
-**Without an authentication token (phone number verification):**
+**Без токена аутентификации (верификация по номеру телефона):**
 
-If you don't have an `auth_token`, you can authenticate by verifying your phone number.
+Если у вас нет `auth_token`, вы можете пройти аутентификацию, подтвердив номер телефона.
 
 ```python
 from max_api import MaxAPI
 
 api = MaxAPI()
 
-phone_number = "your_phone_number"  # e.g., "+11234567890"
+phone_number = "ваш_номер_телефона"  # например, "+79123456789"
 api.send_verify_code(phone_number)
 
-# Enter the code you receive via SMS
-code = input("Enter verification code: ")
+# Введите код, полученный по SMS
+code = input("Введите код подтверждения: ")
 api.check_verify_code(code)
 ```
 
-### Sending a Message
+### Отправка сообщения
 
-Once authenticated, you can easily send messages to any chat.
+После успешной аутентификации вы можете легко отправлять сообщения в любой чат.
 
 ```python
-# The ID of the chat to send the message to
+# ID чата, в который нужно отправить сообщение
 chat_id = "some_chat_id"
-# The text of the message
-message_text = "Hello, world from the API!"
+# Текст сообщения
+message_text = "Привет из API!"
 
-# Send the message
+# Отправка сообщения
 api.send_message(chat_id, message_text)
 ```
 
-You can also send a reply to a specific message:
+Также можно отправить ответ на конкретное сообщение:
 
 ```python
-api.send_message(chat_id, "This is a reply.", reply_id="message_id_to_reply_to")
+api.send_message(chat_id, "Это ответ.", reply_id="id_сообщения_для_ответа")
 ```
 
-### Receiving Events
+### Получение событий
 
-You can handle real-time events, such as new messages, by passing a callback function to the `on_event` parameter during initialization.
+Вы можете обрабатывать события в реальном времени (например, новые сообщения), передав функцию-обработчик в параметр `on_event` при инициализации.
 
 ```python
 import json
 
 def my_event_handler(event_data):
     """
-    A custom callback to handle incoming events from the server.
+    Пользовательская функция для обработки входящих событий от сервера.
     """
     opcode = event_data.get("opcode")
-    if opcode == 128:  # New message event
-        print(f"New Message Received: {json.dumps(event_data, indent=2)}")
+    if opcode == 128:  # Событие: новое сообщение
+        print(f"Получено новое сообщение: {json.dumps(event_data, indent=2, ensure_ascii=False)}")
     else:
-        print(f"Server Event (Opcode {opcode}): {json.dumps(event_data, indent=2)}")
+        print(f"Событие от сервера (Opcode {opcode}): {json.dumps(event_data, indent=2, ensure_ascii=False)}")
 
-# Initialize the API with your custom event handler
+# Инициализация API с пользовательским обработчиком событий
 api = MaxAPI(auth_token=AUTH_TOKEN, on_event=my_event_handler)
 
-# The API will now use my_event_handler for incoming events.
-# Keep the script running to listen for events.
+# Теперь API будет использовать my_event_handler для обработки входящих событий.
+# Не забудьте оставить скрипт запущенным, чтобы получать события.
 ```
 
-### Fetching Chat History
+### Получение истории чата
 
-Retrieve the message history for any chat with a simple method call.
+Историю сообщений любого чата можно получить простым вызовом метода.
 
 ```python
-# The ID of the chat to fetch history from
+# ID чата, из которого нужно получить историю
 chat_id = "some_chat_id"
-# The number of messages to retrieve
+# Количество сообщений для получения
 message_count = 50
 
-# Get the chat history
+# Получение истории чата
 history = api.get_history(chat_id, count=message_count)
 print(history)
 ```
 
-### Subscribing to a Chat
+### Подписка на чат
 
-To receive real-time updates for a specific chat (like new messages or typing indicators), you need to subscribe to it.
+Чтобы получать обновления в реальном времени для конкретного чата (новые сообщения, индикаторы набора текста и т.д.), необходимо подписаться на него.
 
 ```python
-# The ID of the chat to subscribe to
+# ID чата для подписки
 chat_id = "some_chat_id"
 
-# Subscribe to the chat
+# Подписка на чат
 api.subscribe_to_chat(chat_id)
 ```
 
-### Shutdown
+### Завершение работы
 
-The API handles `SIGINT` (Ctrl+C) and `SIGTERM` signals automatically. You can also call the `close()` method manually to disconnect from the WebSocket server.
+API автоматически обрабатывает сигналы `SIGINT` (Ctrl+C) и `SIGTERM`. Также вы можете вручную вызвать метод `close()`, чтобы отключиться от WebSocket-сервера.
 
 ```python
 api.close()
 ```
 
-## API Reference
+## Справочник API
 
 ### `MaxAPI(auth_token=None, on_event=None)`
 
--   **`auth_token`** (`str`, optional): An authentication token for the session.
--   **`on_event`** (`callable`, optional): A callback function for server-push events, which receives one argument: the event data dictionary.
+- **`auth_token`** (`str`, необязательный): токен аутентификации для сессии.
+- **`on_event`** (`callable`, необязательный): функция-обработчик событий от сервера. Принимает один аргумент — словарь с данными события.
 
-### Methods
+### Методы
 
--   **`send_message(chat_id, text, reply_id=None, wait_for_response=False, format=False)`**: Sends a message to a chat.
--   **`get_history(chat_id, count=30, from_timestamp=None)`**: Retrieves the message history for a chat.
--   **`subscribe_to_chat(chat_id, subscribe=True)`**: Subscribes to or unsubscribes from real-time chat updates.
--   **`mark_as_read(chat_id, message_id)`**: Marks a specific message as read.
--   **`get_contact_details(contact_ids)`**: Retrieves profile details for one or more contacts.
--   **`get_contact_by_phone(phone_number)`**: Finds a contact by their phone number.
--   **`get_chat_by_id(chat_id)`**: Retrieves a chat from the local cache by its ID.
--   **`get_all_chats()`**: Returns a dictionary of all cached chats.
--   **`send_verify_code(phone_number)`**: Sends a verification code to a phone number to begin authentication.
--   **`check_verify_code(code)`**: Verifies a code received via SMS to complete authentication.
--   **`send_generic_command(command_name, payload, wait_for_response=True, timeout=10)`**: Sends a raw command to the API by its string name (e.g., `'GET_HISTORY'`).
--   **`get_video(id)`**: Downloads a video by its ID and returns it as a byte stream.
--   **`get_file(id, chat_id, msg_id)`**: Downloads a file by its ID and returns its content and name.
--   **`close()`**: Disconnects from the WebSocket server and shuts down the event loop.
+- **`send_message(chat_id, text, reply_id=None, wait_for_response=False, format=False)`**: отправляет сообщение в чат.
+- **`get_history(chat_id, count=30, from_timestamp=None)`**: получает историю сообщений чата.
+- **`subscribe_to_chat(chat_id, subscribe=True)`**: подписывается на обновления чата или отписывается от них.
+- **`mark_as_read(chat_id, message_id)`**: помечает конкретное сообщение как прочитанное.
+- **`get_contact_details(contact_ids)`**: получает информацию о профиле одного или нескольких контактов.
+- **`get_contact_by_phone(phone_number)`**: находит контакт по номеру телефона.
+- **`get_chat_by_id(chat_id)`**: возвращает чат из локального кэша по его ID.
+- **`get_all_chats()`**: возвращает словарь всех закэшированных чатов.
+- **`send_verify_code(phone_number)`**: отправляет код подтверждения на указанный номер телефона для начала аутентификации.
+- **`check_verify_code(code)`**: проверяет код, полученный по SMS, и завершает аутентификацию.
+- **`send_generic_command(command_name, payload, wait_for_response=True, timeout=10)`**: отправляет произвольную команду API по её строковому имени (например, `'GET_HISTORY'`).
+- **`get_video(id)`**: скачивает видео по его ID и возвращает как байтовый поток.
+- **`get_file(id, chat_id, msg_id)`**: скачивает файл по его ID и возвращает его содержимое и имя.
+- **`close()`**: отключается от WebSocket-сервера и завершает работу цикла событий.
