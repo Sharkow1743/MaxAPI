@@ -9,8 +9,14 @@ import signal
 import requests
 import io
 import logging
-from .md import parse_markdown
 from tornado.httpclient import HTTPRequest
+
+# Mocking parse_markdown if not available
+try:
+    from .md import parse_markdown
+except ImportError:
+    def parse_markdown(text):
+        return [], text
 
 class MaxAPI:
     """
@@ -23,6 +29,7 @@ class MaxAPI:
         'SEND_VERIFY_CODE': 17,
         'CHECK_VERIFY_CODE': 18,
         'AUTHENTICATE': 19,
+        'AUTH_CONFIRM': 20, # Added for registration
         'GET_CONTACT_DETAILS': 32,
         'FIND_BY_PHONE_NUMBER': 46,
         'GET_HISTORY': 49,
@@ -231,7 +238,7 @@ class MaxAPI:
         """
         try:
             data = json.loads(message)
-            
+
             match data.get("cmd"):
                 case 1:
                     seq_id = data.get("seq")
@@ -257,7 +264,7 @@ class MaxAPI:
                     self.logger.error(f"Received API error: {json.dumps(data, indent=4, ensure_ascii=False)}")
                 case _:
                     self.logger.debug(f"Received unexpected API response: {json.dumps(data, indent=4, ensure_ascii=False)}")
-        
+                    
         except Exception as e:
             self.logger.error(f"Error processing message: {e}")
 
@@ -342,17 +349,21 @@ class MaxAPI:
             "draftsSync": 0, "chatsCount": 50
         }
         response = yield self.send_command_async(self.OPCODE_MAP['AUTHENTICATE'], payload)
-        response_payload = response['payload']
+        
+        response_payload = response.get('payload', {})
+        if response_payload.get('error'):
+             raise ValueError(f"Auth Error: {response_payload.get('error')}")
+
         self.logger.info(f"Authentication successful. User: {response_payload['profile']['contact']['names'][0]['name']}")
         self.user = response_payload['profile']['contact']
         
-        # Convert incoming integer chat IDs to strings for internal storage
         chats = {}
-        for item in response_payload['chats']:
-            item_id = str(item.get('id'))
-            new_item = item.copy()
-            del new_item['id']
-            chats[item_id] = new_item
+        if 'chats' in response_payload:
+            for item in response_payload['chats']:
+                item_id = str(item.get('id'))
+                new_item = item.copy()
+                del new_item['id']
+                chats[item_id] = new_item
         self.chats = chats
 
     @tornado.gen.coroutine
@@ -360,7 +371,6 @@ class MaxAPI:
         """Sends a heartbeat to keep the connection alive."""
         if not self.is_running: return
         try:
-            # Heartbeat doesn't need a response, so we call it directly
             self.ioloop.add_callback(self.ws.write_message, json.dumps({
                 "ver": 11, "cmd": 0, "seq": next(self.seq_counter),
                 "opcode": self.OPCODE_MAP['HEARTBEAT'],
@@ -415,7 +425,62 @@ class MaxAPI:
             
         return pending_request.get("response")
 
+    def _finalize_authentication(self):
+        """Helper to run the async authentication sequence from a sync context."""
+        auth_event = threading.Event()
+        auth_result = [None]
+
+        def _run_authenticate():
+            try:
+                future = self._authenticate_async()
+                self.ioloop.add_future(future, lambda f: auth_event.set())
+            except Exception as e:
+                auth_result[0] = e
+                auth_event.set()
+
+        self.ioloop.add_callback(_run_authenticate)
+        auth_event.wait()
+        if auth_result[0] is not None:
+            raise auth_result[0]
+        
+        self.logger.info("API is online and ready.")
+
     # --- Public API Methods ---
+
+    def auth(self, phone: str, first_name: str = "New", last_name: str = "User"):
+        """
+        Initiates the authentication process.
+        
+        Args:
+            phone (str): The phone number (e.g., "+123456789").
+            first_name (str): First name to use IF registration is required.
+            last_name (str): Last name to use IF registration is required.
+
+        Returns:
+            function: A function that accepts the SMS code string.
+                      Calling this function will complete login OR registration automatically.
+        """
+        self.send_verify_code(phone)
+
+        def verify_code_wrapper(code: str):
+            """
+            Inner function to verify code. 
+            Handles both existing users (Login) and new users (Register).
+            """
+            result = self.check_verify_code(code)
+
+            # Check if check_verify_code determined that registration is needed
+            if isinstance(result, dict) and result.get('status') == 'register':
+                self.logger.info("User not found, proceeding to registration.")
+                reg_token = result['token']
+                # Automatically submit registration with provided names
+                return self.submit_registration(first_name, last_name, reg_token)
+            
+            # If result is a string, it's the token, meaning we are logged in
+            return result
+
+        return verify_code_wrapper
+
     def send_message(self, chat_id: str, text: str, reply_id: str = None, wait_for_response: bool = False, format: bool = False):
         """
         Sends a message to a specific chat.
@@ -559,7 +624,7 @@ class MaxAPI:
         """
         payload = {
             "phone": phone_number, "type": "START_AUTH", "language": "ru"
-	    }
+        }
         res = self.send_command(self.OPCODE_MAP['SEND_VERIFY_CODE'], payload)
         if 'payload' in res and 'token' in res['payload']:
             self.token = res['payload']['token']
@@ -574,7 +639,7 @@ class MaxAPI:
             code (str): The verification code.
 
         Returns:
-            str or dict: The final authentication token if successful, otherwise the server response.
+            str or dict: The final authentication token if successful, otherwise a dictionary indicating registration is needed.
         """
         if not self.token:
             raise RuntimeError("Cannot check verification code. Please call send_verify_code first.")
@@ -584,31 +649,57 @@ class MaxAPI:
         }
         res = self.send_command(self.OPCODE_MAP['CHECK_VERIFY_CODE'], payload, wait_for_response=True)
         
-        token = res['payload'].get('tokenAttrs', {}).get('LOGIN', {}).get('token')
-        if token:
-            self.token = token
+        token_attrs = res.get('payload', {}).get('tokenAttrs', {})
+        login_token = token_attrs.get('LOGIN', {}).get('token')
+        register_token = token_attrs.get('REGISTER', {}).get('token')
+
+        if login_token:
+            self.token = login_token
             self.logger.info("Verification successful. Finalizing authentication...")
-
-            auth_event = threading.Event()
-            auth_result = [None]
-
-            def _run_authenticate():
-                try:
-                    future = self._authenticate_async()
-                    self.ioloop.add_future(future, lambda f: auth_event.set())
-                except Exception as e:
-                    auth_result[0] = e
-                    auth_event.set()
-
-            self.ioloop.add_callback(_run_authenticate)
-            auth_event.wait()
-            if auth_result[0] is not None:
-                raise auth_result[0]
-            
-            self.logger.info("API is online and ready.")
+            self._finalize_authentication()
             return self.token
-        self.logger.error(res)
-    
+        
+        elif register_token:
+            self.logger.info("Verification successful, but registration is required.")
+            return {"status": "register", "token": register_token}
+            
+        self.logger.error(f"Unknown verification response: {res}")
+        raise ValueError("Failed to retrieve a valid LOGIN or REGISTER token from response.")
+
+    def submit_registration(self, first_name: str, last_name: str, reg_token: str):
+        """
+        Submits registration info (First/Last Name) to complete the account creation.
+
+        Args:
+            first_name (str): The user's first name.
+            last_name (str): The user's last name.
+            reg_token (str): The registration token received from check_verify_code.
+
+        Returns:
+            str: The final authentication token.
+        """
+        self.logger.info(f"Submitting registration info for {first_name} {last_name}...")
+        payload = {
+            "firstName": first_name,
+            "lastName": last_name,
+            "token": reg_token,
+        }
+
+        res = self.send_command(self.OPCODE_MAP['AUTH_CONFIRM'], payload, wait_for_response=True)
+        
+        payload_data = res.get("payload", {})
+        if payload_data.get("error"):
+             raise ValueError(f"Registration error: {payload_data.get('error')}")
+
+        final_token = payload_data.get("token")
+        if not final_token:
+            raise ValueError("Registration submitted, but no final token received.")
+
+        self.token = final_token
+        self.logger.info("Registration successful. Finalizing authentication...")
+        self._finalize_authentication()
+        return self.token
+
     def send_generic_command(self, command_name: str, payload: dict, wait_for_response: bool = True, timeout: int = 10):
         """
         Sends a raw command to the API using its string name.
