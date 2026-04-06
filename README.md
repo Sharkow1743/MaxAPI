@@ -1,3 +1,6 @@
+> [!IMPORTANT]
+> Больше не поддерживается и не работает. Лучший рабочий вариант сейчас — [PyMax](https://github.com/MaxApiTeam/PyMax)
+
 # Max Messenger API — обёртка на Python
 
 ## Возможности
